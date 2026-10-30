@@ -13,6 +13,8 @@ import cliamp_ipc
 from cliamped_security import (
     MAX_ALBUMS,
     MAX_ARTISTS,
+    MAX_LIBRARY_ROOTS,
+    MAX_PLAYLIST_ADD,
     MAX_PROVIDERS,
     MAX_TEXT_BYTES,
     MAX_TRACKS,
@@ -416,6 +418,97 @@ class SchemaBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(request=request), self.assertRaises(ValidationError):
                 normalize_request(request)
+
+    def test_library_folder_requests_have_exact_schemas(self):
+        self.assertEqual(normalize_request({"cmd": "library.roots"}), {"cmd": "library.roots"})
+        self.assertEqual(normalize_request({"cmd": "library.scan"}), {"cmd": "library.scan"})
+        for command in ("library.add_root", "library.remove_root"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    normalize_request({"cmd": command, "path": "/mnt/nas/Musik & Mehr"}),
+                    {"cmd": command, "path": "/mnt/nas/Musik & Mehr"},
+                )
+        rejected = (
+            {"cmd": "library.roots", "provider": "library"},
+            {"cmd": "library.scan", "path": "/x"},
+            {"cmd": "library.add_root"},
+            {"cmd": "library.add_root", "path": ""},
+            {"cmd": "library.add_root", "path": "/a\nb"},
+            {"cmd": "library.add_root", "path": "x" * 4097},
+            {"cmd": "library.add_root", "path": 5},
+            {"cmd": "library.add_root", "path": "/x", "provider": "library"},
+            {"cmd": "library.remove_root", "path": "/x", "extra": True},
+        )
+        for request in rejected:
+            with self.subTest(request=request), self.assertRaises(ValidationError):
+                normalize_request(request)
+
+    def test_library_folder_responses_are_modeled(self):
+        for command in ("library.roots", "library.add_root", "library.remove_root"):
+            with self.subTest(command=command):
+                result = normalize_response(
+                    {"cmd": command},
+                    {"ok": True, "output": "/ignored", "roots": [{"path": "/mnt/a", "tracks": 12, "available": False}]},
+                )
+                self.assertEqual(result, {"ok": True, "roots": [{"path": "/mnt/a", "tracks": 12, "available": False}]})
+        # A reply without folders is an empty list, not a missing field.
+        self.assertEqual(normalize_response({"cmd": "library.roots"}, {"ok": True})["roots"], [])
+        self.assertEqual(normalize_response({"cmd": "library.scan"}, {"ok": True, "roots": [{"path": "/x"}]}), {"ok": True})
+        for item in ({"path": "/a"}, {"available": True}, {"path": "/a", "available": True, "secret": 1}, {"path": "/a\u0000", "available": True}):
+            with self.subTest(item=item), self.assertRaises(ValidationError):
+                normalize_response({"cmd": "library.roots"}, {"ok": True, "roots": [item]})
+        many = [{"path": f"/m/{i}", "available": True} for i in range(MAX_LIBRARY_ROOTS + 5)]
+        capped = normalize_response({"cmd": "library.roots"}, {"ok": True, "roots": many})
+        self.assertEqual(len(capped["roots"]), MAX_LIBRARY_ROOTS)
+        self.assertTrue(capped["truncated"])
+
+    def test_playlist_requests_have_exact_schemas(self):
+        track = {"path": "/music/a.mp3", "title": "A", "provider_meta": {"library.id": "x"}}
+        self.assertEqual(
+            normalize_request({"cmd": "playlist.create", "provider": "library", "playlist": "Road trip"}),
+            {"cmd": "playlist.create", "provider": "library", "playlist": "Road trip"},
+        )
+        self.assertEqual(
+            normalize_request({"cmd": "playlist.add", "provider": "library", "playlist": "Road trip", "track": track}),
+            {"cmd": "playlist.add", "provider": "library", "playlist": "Road trip", "track": track},
+        )
+        many = normalize_request(
+            {"cmd": "playlist.add_many", "provider": "library", "playlist": "Road trip", "tracks": [track] * MAX_PLAYLIST_ADD}
+        )
+        self.assertEqual(len(many["tracks"]), MAX_PLAYLIST_ADD)
+        self.assertEqual(
+            normalize_request({"cmd": "provider.tracks", "provider": "library", "playlist": "Road trip"}),
+            {"cmd": "provider.tracks", "provider": "library", "playlist": "Road trip", "offset": 0, "limit": 18},
+        )
+        rejected = (
+            {"cmd": "playlist.create", "provider": "library"},
+            {"cmd": "playlist.create", "playlist": "x"},
+            {"cmd": "playlist.create", "provider": "library", "playlist": ""},
+            {"cmd": "playlist.create", "provider": "library", "playlist": "a\nb"},
+            {"cmd": "playlist.create", "provider": "library", "playlist": "x" * 513},
+            {"cmd": "playlist.create", "provider": "library", "playlist": "x", "track": track},
+            {"cmd": "playlist.add", "provider": "library", "playlist": "x"},
+            {"cmd": "playlist.add", "provider": "library", "playlist": "x", "track": {"title": "no path"}},
+            {"cmd": "playlist.add", "provider": "library", "playlist": "x", "tracks": [track]},
+            {"cmd": "playlist.add_many", "provider": "library", "playlist": "x", "tracks": []},
+            {"cmd": "playlist.add_many", "provider": "library", "playlist": "x", "tracks": [track] * (MAX_PLAYLIST_ADD + 1)},
+            {"cmd": "playlist.add_many", "provider": "library", "playlist": "x", "tracks": "no"},
+            {"cmd": "playlist.add_many", "provider": "library", "playlist": "x", "tracks": [track, {"bad": 1}]},
+            {"cmd": "playlist.add_many", "provider": "library", "playlist": "x", "track": track},
+            {"cmd": "provider.tracks", "provider": "library"},
+            {"cmd": "provider.tracks", "provider": "library", "playlist": "x", "limit": MAX_TRACKS + 1},
+        )
+        for request in rejected:
+            with self.subTest(request=request), self.assertRaises(ValidationError):
+                normalize_request(request)
+
+    def test_playlist_track_listing_is_a_track_model(self):
+        result = normalize_response(
+            {"cmd": "provider.tracks"},
+            {"ok": True, "total": 1, "tracks": [{"path": "/music/a.mp3", "title": "A"}]},
+        )
+        self.assertEqual(result["tracks"], [{"path": "/music/a.mp3", "title": "A"}])
+        self.assertEqual(result["total"], 1)
 
     def test_library_browse_requests_use_the_long_provider_deadline(self):
         for command in (
