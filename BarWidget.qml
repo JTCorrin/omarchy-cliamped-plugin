@@ -94,9 +94,11 @@ BarWidget {
   property string libraryPickerLabel: ""
   property int libraryWritesPending: 0
   property string libraryWriteNotice: ""
+  property bool libraryScanning: false
+  property bool libraryArtistsStale: false
+  property bool libraryWriteFailed: false
   property int libraryPollsLeft: 0
   property int libraryPollTracks: -1
-  property int libraryPollSteady: 0
   property int radioCatalogOffset: 0
   property bool radioCatalogHasMore: true
   property bool radioCatalogRequested: false
@@ -747,6 +749,7 @@ BarWidget {
       if (!daemon.running && !startingDaemon && !destroying) startOwnedDaemon(false)
     } else if (isLibraryKind(kind)) {
       libraryError = "Could not start the bounded CLIAMP helper."
+      if (kind === "libPlaylistWrite") finishLibraryWrite(false)
     } else if (isProviderKind(kind)) {
       providerError = "Could not start the bounded CLIAMP helper."
     } else {
@@ -873,8 +876,12 @@ BarWidget {
     if (!request) return
     if (reset) {
       libraryLoaded = false
-      if (view === "artists") libraryArtistsMore = false
-      else libraryAlbumsMore = false
+      if (view === "artists") {
+        libraryArtistsMore = false
+        libraryArtistsStale = false
+      } else {
+        libraryAlbumsMore = false
+      }
     }
     runLibraryRequest(view === "artists" ? "libArtists" : "libAlbums", request)
   }
@@ -892,8 +899,8 @@ BarWidget {
       libraryLoaded = false
       refreshLibraryPlaylists()
     } else if (libraryTop === "artists") {
-      libraryLoaded = libraryArtists.length > 0
-      if (!libraryArtists.length) loadLibraryPage(true)
+      libraryLoaded = libraryArtists.length > 0 && !libraryArtistsStale
+      if (!libraryArtists.length || libraryArtistsStale) loadLibraryPage(true)
     } else {
       libraryAlbums = []
       loadLibraryPage(true)
@@ -905,6 +912,7 @@ BarWidget {
     if (!safeId) return
     libraryArtistId = safeId
     libraryArtistName = cleanText(name, 256)
+    libraryNotice = ""
     libraryView = "artistAlbums"
     libraryAlbums = []
     loadLibraryPage(true)
@@ -915,6 +923,7 @@ BarWidget {
     if (!safeId) return
     libraryAlbumId = safeId
     libraryAlbumName = cleanText(name, 256)
+    libraryNotice = ""
     libraryReturnView = libraryView
     libraryView = "tracks"
     libraryTracks = []
@@ -955,16 +964,19 @@ BarWidget {
     })
   }
 
+  // A refresh in the background must not wipe the error of an action, so the
+  // folder and playlist lists load without clearing it.
   function refreshLibraryRoots() {
-    runLibraryRequest("libRoots", { cmd: "library.roots" })
+    enqueueIpc("libRoots", { cmd: "library.roots" }, [])
   }
 
-  // Lets the lists catch up while CLIAMP scans a new or changed folder: it
-  // looks at the folder sizes every few seconds, for at most a minute.
+  // Looks at the folder sizes every few seconds while CLIAMP scans, so the
+  // lists catch up, until CLIAMP says that the scan ended. The count of looks
+  // is the bound: about thirteen minutes, and none are sent while the panel is
+  // closed.
   function startLibraryPolling() {
-    libraryPollsLeft = 15
+    libraryPollsLeft = 200
     libraryPollTracks = -1
-    libraryPollSteady = 0
     libraryPollTimer.restart()
   }
 
@@ -974,14 +986,17 @@ BarWidget {
       return
     }
     libraryPollsLeft -= 1
-    refreshLibraryRoots()
+    if (panelLoader.item && panelLoader.item.opened === true) refreshLibraryRoots()
   }
 
   function addLibraryRoot(path) {
     var safePath = opaqueText(path, 4096)
-    if (!safePath) return
+    if (!safePath) {
+      libraryError = "CLIAMPed cannot send that folder: its name has control or invisible characters."
+      return
+    }
     libraryNotice = ""
-    if (runLibraryRequest("libRoots", { cmd: "library.add_root", path: safePath })) startLibraryPolling()
+    runLibraryRequest("libRoots", { cmd: "library.add_root", path: safePath })
   }
 
   function removeLibraryRoot(path) {
@@ -993,11 +1008,17 @@ BarWidget {
 
   function rescanLibrary() {
     libraryNotice = ""
-    if (runLibraryRequest("libRoots", { cmd: "library.scan" })) startLibraryPolling()
+    runLibraryRequest("libRoots", { cmd: "library.scan" })
   }
 
   function refreshLibraryPlaylists() {
-    runLibraryRequest("libPlaylists", { cmd: "provider.playlists", provider: libraryProviderKey })
+    enqueueIpc("libPlaylists", { cmd: "provider.playlists", provider: libraryProviderKey }, [])
+  }
+
+  // Marks the lists that were read before the index changed as out of date.
+  function staleLibraryLists() {
+    libraryArtistsStale = true
+    if (libraryView === "artists" || libraryView === "albums") loadLibraryPage(true)
   }
 
   function openLibraryPlaylist(id, name) {
@@ -1005,6 +1026,7 @@ BarWidget {
     if (!safeId) return
     libraryPlaylistId = safeId
     libraryPlaylistName = cleanText(name, 256)
+    libraryNotice = ""
     libraryView = "playlistTracks"
     libraryTracks = []
     libraryLoaded = false
@@ -1062,16 +1084,36 @@ BarWidget {
     if (!safeId || !tracks.length) return
     var requests = playlistWriteRequests(safeId, tracks)
     if (create) requests.unshift({ cmd: "playlist.create", provider: libraryProviderKey, playlist: safeId })
-    if (ipcQueue.length + requests.length > maxIpcQueueItems - 4) {
+    if (libraryWritesPending > 0 || ipcQueue.length + requests.length > maxIpcQueueItems - 4) {
       libraryError = "CLIAMP is busy; try again in a moment."
       return
     }
     libraryError = ""
+    libraryWriteFailed = false
     libraryWriteNotice = (tracks.length === 1 ? "Added 1 track to “" : "Added " + tracks.length + " tracks to “")
       + cleanText(playlistName, 128) + "”."
     for (var i = 0; i < requests.length; ++i) {
-      if (enqueueIpc("libPlaylistWrite", requests[i], [])) libraryWritesPending += 1
+      if (enqueueIpc("libPlaylistWrite", requests[i], [])) {
+        libraryWritesPending += 1
+      } else {
+        // A request that was not queued is a write that did not happen.
+        libraryWriteFailed = true
+      }
     }
+    if (libraryWritesPending === 0) libraryError = libraryError || "Could not send the request to CLIAMP."
+  }
+
+  // Counts one playlist write as done. The notice and the closing of the
+  // picker wait for the last write, and only a clean run earns them.
+  function finishLibraryWrite(succeeded) {
+    if (!succeeded) libraryWriteFailed = true
+    libraryWritesPending = Math.max(0, libraryWritesPending - 1)
+    if (libraryWritesPending > 0) return
+    if (!libraryWriteFailed) {
+      libraryNotice = libraryWriteNotice
+      closeLibraryPicker()
+    }
+    refreshLibraryPlaylists()
   }
 
   function addToLibraryPlaylist(playlistId, playlistName) {
@@ -1579,7 +1621,7 @@ BarWidget {
           if (!daemon.running && !root.startingDaemon && !root.destroying) root.startOwnedDaemon(false)
         } else if (root.isLibraryKind(kind)) {
           root.libraryError = message
-          if (kind === "libPlaylistWrite") root.libraryWritesPending = Math.max(0, root.libraryWritesPending - 1)
+          if (kind === "libPlaylistWrite") root.finishLibraryWrite(false)
         } else if (kind === "providers" || kind === "playlists" || kind === "catalog"
             || kind === "favorite" || kind === "search" || kind === "load" || kind === "urlLoad") {
           root.providerError = message
@@ -1695,40 +1737,45 @@ BarWidget {
           root.libraryLoaded = true
         }
       } else if (kind === "libRoots") {
-        root.libraryRoots = root.normalizeLibraryRoots(response.roots)
+        var firstRoots = !root.libraryRootsLoaded
+        var wasScanning = root.libraryScanning
+        var command = current && current.request ? current.request.cmd : ""
+        if (Array.isArray(response.roots)) root.libraryRoots = root.normalizeLibraryRoots(response.roots)
         root.libraryRootsLoaded = true
-        // A library with no folder has nothing to browse: show where to add one.
-        if (!root.libraryRoots.length && (root.libraryView === "artists" || root.libraryView === "albums")) {
+        root.libraryScanning = response.scanning === true
+        // A library with no folder has nothing to browse: the first time that
+        // this is learned, show where to add one. Later looks do not move the user.
+        if (firstRoots && !root.libraryRoots.length && (root.libraryView === "artists" || root.libraryView === "albums")) {
           root.libraryTop = "folders"
           root.libraryView = "folders"
         }
-        if (root.libraryPollsLeft > 0) {
-          var total = root.libraryTotalTracks
-          if (total === root.libraryPollTracks) {
-            root.libraryPollSteady += 1
-          } else {
-            root.libraryPollTracks = total
-            root.libraryPollSteady = 0
-            // The index grew or shrank, so the lists on screen are out of date.
-            if (root.libraryView === "artists" || root.libraryView === "albums") root.loadLibraryPage(true)
-          }
-          // Two unchanged looks in a row mean the scan has finished.
-          if (root.libraryPollSteady >= 2 && total > 0) root.libraryPollsLeft = 0
-        } else if (current && current.request && current.request.cmd === "library.remove_root") {
+        if (command === "library.remove_root") {
           root.libraryArtists = []
           root.libraryAlbums = []
           root.libraryTracks = []
+          root.libraryArtistsStale = false
+          if (root.libraryView === "artists" || root.libraryView === "albums") root.loadLibraryPage(true)
+        }
+        if (root.libraryScanning) {
+          // Only a successful add or scan reaches this branch, so a refused
+          // folder never starts the polling.
+          if (!libraryPollTimer.running) root.startLibraryPolling()
+          var total = root.libraryTotalTracks
+          if (total !== root.libraryPollTracks) {
+            root.libraryPollTracks = total
+            root.staleLibraryLists()
+          }
+        } else if (wasScanning || command === "library.add_root" || command === "library.scan") {
+          // The scan ended, or was over before the first look: read the lists again.
+          root.libraryPollsLeft = 0
+          libraryPollTimer.stop()
+          root.staleLibraryLists()
         }
       } else if (kind === "libPlaylists") {
         root.libraryPlaylists = root.normalizePlaylists(response.playlists)
         if (root.libraryView === "playlists") root.libraryLoaded = true
       } else if (kind === "libPlaylistWrite") {
-        root.libraryWritesPending = Math.max(0, root.libraryWritesPending - 1)
-        if (root.libraryWritesPending === 0) {
-          root.libraryNotice = root.libraryWriteNotice
-          root.closeLibraryPicker()
-          root.refreshLibraryPlaylists()
-        }
+        root.finishLibraryWrite(true)
       } else if (kind === "libFavorite") {
         var heartPath = current && current.request && current.request.track
           ? current.request.track.path : ""

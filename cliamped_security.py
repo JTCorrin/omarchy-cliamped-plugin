@@ -876,8 +876,11 @@ def normalize_response(
         )
         _optional_int(response, result, "index", -1, 1_000_000_000)
         _optional_int(response, result, "total", 0, 1_000_000_000)
-    elif command in {"library.roots", "library.add_root", "library.remove_root"}:
+    elif command in {"library.roots", "library.add_root", "library.remove_root", "library.scan"}:
         _add_model(response, result, "roots", MAX_LIBRARY_ROOTS, _normalize_library_root)
+        # Whether CLIAMP is scanning the folders now, so a client knows how
+        # long to keep looking at their sizes.
+        _optional_bool(response, result, "scanning")
     elif command == "history":
         _add_model(response, result, "history", MAX_HISTORY_ITEMS, _normalize_history)
     elif command == "lyrics":

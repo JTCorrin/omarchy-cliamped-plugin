@@ -1648,6 +1648,10 @@ Panel {
                     if (root.hostWidget) root.hostWidget.searchLibrary(text)
                     root.returnToPanelKeys()
                   }
+                  Keys.onEnterPressed: {
+                    if (root.hostWidget) root.hostWidget.searchLibrary(text)
+                    root.returnToPanelKeys()
+                  }
                   Keys.onUpPressed: if (root.hostWidget) root.hostWidget.adjustVolume(2)
                   Keys.onDownPressed: if (root.hostWidget) root.hostWidget.adjustVolume(-2)
                   Keys.onEscapePressed: root.returnToPanelKeys()
@@ -2199,7 +2203,7 @@ Panel {
                 }
               }
               SafeText {
-                visible: libraryBody.host && libraryBody.host.libraryPollsLeft > 0
+                visible: libraryBody.host && libraryBody.host.libraryScanning
                 width: parent.width
                 text: "SCANNING… THE COUNTS ABOVE UPDATE AS CLIAMP READS THE FILES."
                 color: root.turquoise
@@ -2270,6 +2274,11 @@ Panel {
                       font: playlistNameInput.font
                     }
                     Keys.onReturnPressed: {
+                      if (root.hostWidget) root.hostWidget.createLibraryPlaylist(text)
+                      text = ""
+                      root.returnToPanelKeys()
+                    }
+                    Keys.onEnterPressed: {
                       if (root.hostWidget) root.hostWidget.createLibraryPlaylist(text)
                       text = ""
                       root.returnToPanelKeys()
@@ -2376,7 +2385,11 @@ Panel {
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: if (root.hostWidget) root.hostWidget.closeLibraryPicker()
+                  onClicked: {
+                    if (root.hostWidget) root.hostWidget.closeLibraryPicker()
+                    playlistNameInput.text = ""
+                    root.returnToPanelKeys()
+                  }
                 }
               }
             }

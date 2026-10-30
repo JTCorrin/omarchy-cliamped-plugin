@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -892,6 +893,11 @@ def choose_music_folder() -> tuple[str | None, bool]:
     selections = _parse_zenity_selections(stdout)
     if len(selections) != 1:
         raise PickerBoundaryError("choose exactly one folder")
+    # The path goes to CLIAMP under the IPC allowlist, which refuses control and
+    # format characters (zero-width and bidirectional marks among them). Say so
+    # here, where the user can still pick another folder.
+    if any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in selections[0]):
+        raise PickerBoundaryError("the folder name contains control or invisible formatting characters")
     return selections[0], False
 
 

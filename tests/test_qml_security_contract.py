@@ -165,14 +165,30 @@ class QmlSecurityContractTests(unittest.TestCase):
         self.assertIn("i += 24", self.bar)
         self.assertIn("tracks.slice(i, i + 24)", self.bar)
         # A failed write must not leave the pending counter stuck.
-        self.assertIn('kind === "libPlaylistWrite") root.libraryWritesPending = Math.max(0,', self.bar)
+        # Every way a write can end goes through one counter: the exit
+        # handler, a helper that did not start, and the success branch.
+        self.assertEqual(self.bar.count("finishLibraryWrite("), 4)  # definition + three callers
+        self.assertIn("function finishLibraryWrite(succeeded)", self.bar)
+        # Only a clean run earns the success notice and closes the picker.
+        self.assertIn("if (!libraryWriteFailed) {", self.bar)
+        # A refused or failed request must not read as success.
+        self.assertIn("libraryWriteFailed = true", self.bar)
         # Favorites and Recently Played are CLIAMP's own lists, not add targets.
         self.assertIn('"Favorites" && id !== "Recently Played"', self.bar)
 
     def test_library_polling_is_bounded_and_stopped_on_teardown(self):
-        self.assertIn("libraryPollsLeft = 15", self.bar)
+        self.assertIn("libraryPollsLeft = 200", self.bar)
         self.assertIn("libraryPollTimer.stop()", self.bar)
         self.assertEqual(self.bar.count("libraryPollTimer.restart()"), 1)
+        # It follows CLIAMP's own word that the scan ended, sends nothing while
+        # the panel is closed, and never starts for a refused folder.
+        self.assertIn("response.scanning === true", self.bar)
+        self.assertIn("panelLoader.item.opened === true", self.bar)
+        self.assertNotIn('"library.add_root", path: safePath })) startLibraryPolling()', self.bar)
+        # Background refreshes must not wipe an action's error message.
+        refresh = self.bar[self.bar.index("function refreshLibraryRoots()"):]
+        refresh = refresh[: refresh.index("function startLibraryPolling()")]
+        self.assertNotIn("runLibraryRequest", refresh)
 
     def test_every_command_sent_by_qml_is_in_the_helper_allowlist(self):
         sent = set(re.findall(r'cmd:\s*"([A-Za-z_.]+)"', self.bar + self.panel))

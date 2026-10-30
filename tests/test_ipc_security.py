@@ -453,7 +453,15 @@ class SchemaBoundaryTests(unittest.TestCase):
                 self.assertEqual(result, {"ok": True, "roots": [{"path": "/mnt/a", "tracks": 12, "available": False}]})
         # A reply without folders is an empty list, not a missing field.
         self.assertEqual(normalize_response({"cmd": "library.roots"}, {"ok": True})["roots"], [])
-        self.assertEqual(normalize_response({"cmd": "library.scan"}, {"ok": True, "roots": [{"path": "/x"}]}), {"ok": True})
+        # A scan replies with the folders and whether it still runs.
+        scan = normalize_response(
+            {"cmd": "library.scan"},
+            {"ok": True, "scanning": True, "roots": [{"path": "/mnt/a", "tracks": 3, "available": True}]},
+        )
+        self.assertEqual(scan, {"ok": True, "roots": [{"path": "/mnt/a", "tracks": 3, "available": True}], "scanning": True})
+        self.assertNotIn("scanning", normalize_response({"cmd": "library.roots"}, {"ok": True}))
+        with self.assertRaises(ValidationError):
+            normalize_response({"cmd": "library.roots"}, {"ok": True, "scanning": "yes"})
         for item in ({"path": "/a"}, {"available": True}, {"path": "/a", "available": True, "secret": 1}, {"path": "/a\u0000", "available": True}):
             with self.subTest(item=item), self.assertRaises(ValidationError):
                 normalize_response({"cmd": "library.roots"}, {"ok": True, "roots": [item]})

@@ -90,6 +90,15 @@ class MusicFolderPickerTests(unittest.TestCase):
             ), self.assertRaises(cliamp_file_picker.PickerBoundaryError):
                 cliamp_file_picker.choose_music_folder()
 
+    def test_refuses_names_that_the_allowlist_would_refuse_later(self):
+        # A zero-width space and a right-to-left mark pass the chooser's own
+        # control check but not the IPC allowlist: say so while the user can pick again.
+        for name in ("/mnt/mu\u200bsic", "/mnt/mu\u200esic", "/mnt/mu\u202esic"):
+            with self.subTest(name=name), patch(
+                "cliamp_file_picker._run_zenity", return_value=(0, name.encode() + b"\n", b"")
+            ), self.assertRaisesRegex(cliamp_file_picker.PickerBoundaryError, "invisible formatting"):
+                cliamp_file_picker.choose_music_folder()
+
     def run_main(self, argv, folder):
         output = io.BytesIO()
         stdout = types.SimpleNamespace(buffer=output, flush=lambda: None)
