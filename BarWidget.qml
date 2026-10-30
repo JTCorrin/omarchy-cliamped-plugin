@@ -103,6 +103,8 @@ BarWidget {
   property bool libraryWriteFailed: false
   property bool libraryAutoScanned: false
   property bool libraryScanFresh: false
+  property bool libraryScanRequested: false
+  property var libraryWriteQueued: []
   property int libraryScanStepsLeft: 0
   property int libraryScanTracks: -1
   property var libraryFavorites: ({})
@@ -967,7 +969,7 @@ BarWidget {
       refreshLibraryRoots()
     } else if (libraryTop === "playlists") {
       libraryLoaded = false
-      refreshLibraryPlaylists()
+      if (!libraryNeedsCliamp()) refreshLibraryPlaylists()
     } else if (libraryTop === "artists") {
       libraryLoaded = libraryArtists.length > 0 && !libraryArtistsStale
       if (!libraryArtists.length || libraryArtistsStale) loadLibraryPage(true)
@@ -1018,7 +1020,8 @@ BarWidget {
     } else if (libraryView === "artistAlbums") {
       if (!returnToLibraryTrackList(libraryArtistReturn)) {
         libraryView = "artists"
-        libraryLoaded = libraryArtists.length > 0
+        libraryLoaded = libraryArtists.length > 0 && !libraryArtistsStale
+        if (!libraryArtists.length || libraryArtistsStale) loadLibraryPage(true)
       }
     } else if (libraryView === "search") {
       librarySearchAttempted = false
@@ -1103,7 +1106,10 @@ BarWidget {
   function startLibraryScan(fresh) {
     if (destroying) return
     libraryScanning = true
-    libraryScanFresh = fresh === true
+    // A request that arrives while a step runs is remembered: that step's reply
+    // must not end the scanning that the user just asked for.
+    libraryScanRequested = true
+    if (fresh === true) libraryScanFresh = true
     libraryScanStepsLeft = 4000
     libraryScanTracks = -1
     libraryScanTimer.interval = 50
@@ -1117,6 +1123,7 @@ BarWidget {
       return
     }
     libraryScanStepsLeft -= 1
+    libraryScanRequested = false
     var request = { op: "scan", budget: 8 }
     if (libraryScanFresh) {
       request.fresh = true
@@ -1146,15 +1153,23 @@ BarWidget {
       tracks: cleanInteger(response.tracks, 0, 1000000000, 0)
     }
     var scanning = response.scanning === true
+    var ended = libraryScanning && !scanning && !libraryScanRequested
     // The lists on screen catch up as tracks arrive, and once more at the end.
-    if (libraryScanInfo.tracks !== libraryScanTracks || (libraryScanning && !scanning)) {
+    // While a scan runs only a list that has not been paged is replaced: the
+    // pages that the user opened stay until the scan ends.
+    if (ended) {
       libraryScanTracks = libraryScanInfo.tracks
       staleLibraryLists()
+    } else if (libraryScanInfo.tracks !== libraryScanTracks) {
+      libraryScanTracks = libraryScanInfo.tracks
+      var shown = libraryView === "artists" ? libraryArtists.length : libraryView === "albums" ? libraryAlbums.length : -1
+      if (shown >= 0 && shown <= libraryPageSize) staleLibraryLists()
+      else libraryArtistsStale = true
     }
-    libraryScanning = scanning
-    if (scanning) {
+    libraryScanning = scanning || libraryScanRequested
+    if (libraryScanning) {
       // A busy reply means another step is running, so wait longer before asking.
-      libraryScanTimer.interval = response.busy === true ? 2000 : 100
+      libraryScanTimer.interval = response.busy === true ? 2000 : (scanning ? 100 : 50)
       libraryScanTimer.restart()
     }
   }
@@ -1181,9 +1196,16 @@ BarWidget {
     if (libraryView === "artists" || libraryView === "albums") loadLibraryPage(true)
   }
 
+  // Playing, playlists and favorites use CLIAMP; scanning, browsing and search do not.
+  function libraryNeedsCliamp() {
+    if (sessionReady) return false
+    libraryError = "CLIAMP is not running yet. Playing, playlists and favorites need it."
+    return true
+  }
+
   function openLibraryPlaylist(id, name) {
     var safeId = opaqueText(id, 512)
-    if (!safeId) return
+    if (!safeId || libraryNeedsCliamp()) return
     libraryPlaylistId = safeId
     libraryPlaylistName = cleanText(name, 256)
     libraryNotice = ""
@@ -1198,7 +1220,7 @@ BarWidget {
 
   // Loads the open playlist into the queue and plays it from startIndex.
   function playLibraryPlaylist(startIndex) {
-    if (!libraryPlaylistId) return
+    if (!libraryPlaylistId || libraryNeedsCliamp()) return
     libraryPendingIndex = cleanInteger(startIndex, 0, 1000000, 0)
     loadedProviderPlaylistId = ""
     runLibraryRequest("libLoad", {
@@ -1241,10 +1263,16 @@ BarWidget {
   function writeToLibraryPlaylist(playlistId, playlistName, create) {
     var safeId = opaqueText(playlistId, 512)
     var tracks = libraryPickerTracks
-    if (!safeId || !tracks.length) return
+    if (!safeId || !tracks.length || libraryNeedsCliamp()) return
     var requests = playlistWriteRequests(safeId, tracks)
-    if (create) requests.unshift({ cmd: "playlist.create", provider: libraryProviderKey, playlist: safeId })
-    if (libraryWritesPending > 0 || ipcQueue.length + requests.length > maxIpcQueueItems - 4) {
+    libraryWriteQueued = []
+    if (create) {
+      // Nothing is added to a playlist that could not be created (it may exist
+      // already), so the adds wait for the create to succeed.
+      libraryWriteQueued = requests
+      requests = [{ cmd: "playlist.create", provider: libraryProviderKey, playlist: safeId }]
+    }
+    if (libraryWritesPending > 0 || ipcQueue.length + requests.length + libraryWriteQueued.length > maxIpcQueueItems - 4) {
       libraryError = "CLIAMP is busy; try again in a moment."
       return
     }
@@ -1252,23 +1280,38 @@ BarWidget {
     libraryWriteFailed = false
     libraryWriteNotice = (tracks.length === 1 ? "Added 1 track to “" : "Added " + tracks.length + " tracks to “")
       + cleanText(playlistName, 128) + "”."
+    enqueueLibraryWrites(requests)
+    if (libraryWritesPending === 0) libraryError = libraryError || "Could not send the request to CLIAMP."
+  }
+
+  function enqueueLibraryWrites(requests) {
     for (var i = 0; i < requests.length; ++i) {
       if (enqueueIpc("libPlaylistWrite", requests[i], [])) {
         libraryWritesPending += 1
       } else {
         // A request that was not queued is a write that did not happen.
         libraryWriteFailed = true
+        libraryError = libraryError || "Part of the request could not be sent to CLIAMP."
       }
     }
-    if (libraryWritesPending === 0) libraryError = libraryError || "Could not send the request to CLIAMP."
   }
 
   // Counts one playlist write as done. The notice and the closing of the
   // picker wait for the last write, and only a clean run earns them.
   function finishLibraryWrite(succeeded) {
-    if (!succeeded) libraryWriteFailed = true
+    if (!succeeded) {
+      libraryWriteFailed = true
+      libraryWriteQueued = []
+    }
     libraryWritesPending = Math.max(0, libraryWritesPending - 1)
     if (libraryWritesPending > 0) return
+    if (libraryWriteQueued.length) {
+      // The playlist exists now: add the tracks.
+      var next = libraryWriteQueued
+      libraryWriteQueued = []
+      enqueueLibraryWrites(next)
+      if (libraryWritesPending > 0) return
+    }
     if (!libraryWriteFailed) {
       libraryNotice = libraryWriteNotice
       closeLibraryPicker()
@@ -1293,7 +1336,7 @@ BarWidget {
   // source in one list, which it shows as Favorites.
   function toggleTrackFavorite(track) {
     var safeTrack = normalizeTrack(track)
-    if (!safeTrack) return
+    if (!safeTrack || libraryNeedsCliamp()) return
     runLibraryRequest("libFavorite", {
       cmd: "playlist.bookmark", provider: libraryProviderKey, track: safeTrack
     })
@@ -1313,6 +1356,7 @@ BarWidget {
   // writes the album as a playlist file, which CLIAMP loads in one request.
   function playLibraryAlbum(startIndex) {
     if (!libraryAlbumId) return
+    if (libraryNeedsCliamp()) return
     libraryPendingIndex = cleanInteger(startIndex, 0, 1000000, 0)
     loadedProviderPlaylistId = ""
     runLibraryHelper("libQueueFile", { op: "queue_file", album: libraryAlbumId })
@@ -1383,10 +1427,15 @@ BarWidget {
         startLibraryScan(true)
       }
     } else if (kind === "libQueueFile") {
-      // Replace the queue with the album, in one request to CLIAMP.
-      var queued = enqueueIpc("queueMutation", { cmd: "queue.clear" }, [])
+      // Replace the queue with the album, in one request to CLIAMP. The queue is
+      // cleared only when both requests fit, so a failure never leaves it empty.
+      var queued = sessionReady && ipcQueue.length + 2 <= maxIpcQueueItems
+        && enqueueIpc("queueMutation", { cmd: "queue.clear" }, [])
         && enqueueIpc("libLoad", { cmd: "url.load", path: opaqueText(response.path, 4096), play: true }, [])
-      if (!queued) libraryError = "CLIAMP is not ready; try again in a moment."
+      if (!queued) {
+        libraryPendingIndex = 0
+        libraryError = "CLIAMP is not ready; try again in a moment."
+      }
     }
   }
 
@@ -1838,6 +1887,7 @@ BarWidget {
           // The stars come from a list that may not exist yet; its absence is not an error.
           if (kind !== "libFavorites") root.libraryError = message
           if (kind === "libPlaylistWrite") root.finishLibraryWrite(false)
+          if (kind === "libLoad") root.libraryPendingIndex = 0
         } else if (kind === "providers" || kind === "playlists" || kind === "catalog"
             || kind === "favorite" || kind === "search" || kind === "load" || kind === "urlLoad") {
           root.providerError = message
@@ -1944,6 +1994,8 @@ BarWidget {
           else hearts[heartPath] = true
           root.libraryFavorites = hearts
         }
+        // CLIAMP has the last word on which tracks are favorites.
+        root.refreshLibraryFavorites()
       } else if (kind === "libLoad") {
         root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
         root.currentIndex = root.queueTracks.length ? 0 : -1
@@ -2006,6 +2058,7 @@ BarWidget {
       if (root.libraryHelperTimedOut || exitCode !== 0 || !response || !response.ok) {
         root.libraryError = response && response.error ? root.cleanText(response.error, 1024)
           : root.libraryHelperTimedOut ? "The library request exceeded its deadline." : "The library helper failed."
+        if (current && current.kind === "libQueueFile") root.libraryPendingIndex = 0
       } else if (current) {
         root.applyLibraryResult(current.kind, current.request, response)
       }

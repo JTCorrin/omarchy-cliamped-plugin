@@ -62,8 +62,9 @@ It takes one JSON request of at most 16 KiB. Every operation has an exact schema
 unknown fields and operations are refused, and a reply is trimmed to the 256 KiB
 output cap rather than failing.
 
-A scan is a series of steps of at most 20 seconds that resume where the last
-stopped, so no process runs for long. It reads folders and files, never follows a
+A scan is a series of steps that resume where the last stopped, so no process runs
+for long: the panel asks for 8 seconds a step, the helper accepts at most 20, and
+a step is killed after 40. It reads folders and files, never follows a
 symlink, skips names with control characters, dot files, `@eaDir` and `#recycle`,
 descends at most 40 levels, and stops reading folders once a scan has queued more than one million files to read. A folder it
 cannot read keeps what the index knew below it, and a folder that is missing or

@@ -46,7 +46,7 @@ The Radio Browser directory loads automatically; use ☆ and ★ on directory or
 
 ## Library
 
-The Library tab keeps its own index of the music folders you choose, so it works with the CLIAMP you already have: it needs nothing from CLIAMP but its public API to play your music. The index is a SQLite file, `~/.local/share/cliamped/library.sqlite3`. CLIAMPed reads the tags itself (ID3, FLAC, Ogg Vorbis and Opus, MP4/M4A) and falls back to the file name.
+The Library tab keeps its own index of the music folders you choose, so it works with the CLIAMP you already have. Scanning, browsing and searching need nothing from CLIAMP; playing, playlists and favorites use CLIAMP's public API. The index is a SQLite file, `~/.local/share/cliamped/library.sqlite3`. CLIAMPed reads the tags itself (ID3, FLAC, Ogg Vorbis and Opus, MP4/M4A) and falls back to the file name.
 
 - **Folders** is where you start. **Add Music Folder…** opens the native chooser; pick the folder where your music lives, such as a mounted NAS share. A scan reads it in the background: the counts rise while it runs, and the lists fill in. **Rescan** looks for new, changed and removed files, and **Remove** takes a folder out of the Library without touching your files.
 - **Artists** lists artists, then their albums, then the tracks of an album. **Albums** lists every album and sorts by name, artist, recently added or year.
@@ -54,7 +54,7 @@ The Library tab keeps its own index of the music folders you choose, so it works
 - **Play Album** loads the album into the Queue and plays it, and selecting a track in an album starts there. The star at the end of a track row toggles CLIAMP's ♥ favorite.
 - **Playlists** lists your saved playlists, including Favorites and Recently Played. The **＋** on a track, and **Save Album**, add to a playlist or create one. These are CLIAMP's own saved playlists, so CLIAMP shows them too.
 
-A first scan of a large share can take several minutes, because every file is opened once; after that only new and changed files are read. A scan runs in short steps, so you can use the panel meanwhile, and one that the shell interrupts continues at the next start. If a share is not mounted, or a folder holds no audio while the index holds some, CLIAMPed keeps the saved index and marks the folder not readable. The scan skips dot files (such as the `._` files macOS leaves on a share), `@eaDir` and `#recycle`, and does not follow symlinks.
+A first scan of a large share can take several minutes, because every file is opened once; after that only new and changed files are read. The Library scans once each time the shell starts, when you first open the tab. A scan runs in short steps, so you can use the panel meanwhile, and one that the shell interrupts continues the next time you open the Library tab. If a share is not mounted, or a folder holds no audio while the index holds some, CLIAMPed keeps the saved index and marks the folder not readable. The scan skips dot files (such as the `._` files macOS leaves on a share), `@eaDir` and `#recycle`, and does not follow symlinks.
 
 Lists load 60 items at a time with **Load More**, and the panel keeps at most 600 items of a list. An album shows at most 200 tracks and a search at most 50 results. The Library plays through CLIAMP's `url.load` and queue, so it needs CLIAMP 2.0 or newer, as the rest of CLIAMPed does. Albums are loaded from a short-lived playlist file in `$XDG_RUNTIME_DIR/cliamped`, so CLIAMP reads the tags of each file itself.
 

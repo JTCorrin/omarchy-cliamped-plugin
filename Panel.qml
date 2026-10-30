@@ -2184,7 +2184,8 @@ Panel {
                   ]
                   Rectangle {
                     required property var modelData
-                    readonly property bool available: root.hostWidget && root.hostWidget.sessionReady
+                    // Folders need no CLIAMP: only the library helper.
+                    readonly property bool available: root.hostWidget
                       && (modelData.action === "add" || root.hostWidget.libraryRoots.length > 0)
                     width: (folderActions.width - folderActions.spacing) / 2
                     height: Style.space(44)
