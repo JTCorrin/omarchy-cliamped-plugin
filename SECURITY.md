@@ -25,10 +25,15 @@ are untrusted.
   malformed types, duplicate JSON keys, non-finite numbers, unknown item
   fields, oversized fields, and excess aggregate model data are rejected.
 
-Python admits at most 32 providers, 256 playlists/tracks, 64 history/device
-items, and 512 lyric lines. QML applies a second, smaller retention boundary of
-128 playlists/tracks/favorites, 24 history items, 32 devices, and 256 lyric
-lines, with a 128 Ki-character aggregate budget. The resident IPC work queue is
+Python admits at most 32 providers, 256 playlists/tracks, 200 artists/albums per
+page, 64 history/device items, and 512 lyric lines. The Library browse commands
+(`provider.artists`, `provider.artist_albums`, `provider.albums`,
+`provider.album_tracks`, `provider.load_album`) each have an exact schema: item
+IDs are opaque strings of at most 512 bytes, `sort` is at most 64 bytes, and
+`offset` and `limit` are bounded per page. Responses keep only the modeled
+artist, album, sort and track fields. QML applies a second, smaller retention boundary of
+128 playlists/tracks/favorites, 600 Library artists or albums, 24 history items,
+32 devices, and 256 lyric lines, with a 128 Ki-character aggregate budget. The resident IPC work queue is
 limited to 24 entries and coalesces polls, searches, and volume snapshots.
 
 ## Rendering and processes

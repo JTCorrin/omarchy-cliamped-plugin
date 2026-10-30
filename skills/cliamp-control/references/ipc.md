@@ -21,6 +21,10 @@ Useful read operations:
 {"cmd":"provider.playlists","provider":"radio"}
 {"cmd":"provider.catalog","provider":"radio","offset":0,"limit":18}
 {"cmd":"provider.search","provider":"radio","query":"jazz","limit":18}
+{"cmd":"provider.artists","provider":"library","offset":0,"limit":60}
+{"cmd":"provider.artist_albums","provider":"library","artist":"<artist id>","offset":0,"limit":60}
+{"cmd":"provider.albums","provider":"library","sort":"newest","offset":0,"limit":60}
+{"cmd":"provider.album_tracks","provider":"library","album":"<album id>","offset":0,"limit":200}
 {"cmd":"history","limit":24}
 {"cmd":"lyrics"}
 {"cmd":"device","name":"list"}
@@ -38,6 +42,7 @@ Mutating operations used by CLIAMPed:
 {"cmd":"queue.clear"}
 {"cmd":"provider.load","provider":"radio","playlist":"<id>"}
 {"cmd":"provider.favorite","provider":"radio","playlist":"<id>"}
+{"cmd":"provider.load_album","provider":"library","album":"<album id>"}
 ```
 
 The IPC `volume` value is an absolute dB target, unlike the relative delta accepted by `cliamp volume`. Keep absolute targets within `-30` to `+6` dB.

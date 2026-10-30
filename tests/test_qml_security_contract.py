@@ -2,6 +2,8 @@ import re
 from pathlib import Path
 import unittest
 
+from cliamped_security import ValidationError, normalize_request
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,7 +43,7 @@ class QmlSecurityContractTests(unittest.TestCase):
     def test_models_are_normalized_before_resident_assignment(self):
         self.assertNotRegex(
             self.bar + self.panel,
-            r"(?:providers|providerPlaylists|providerResults|searchFavorites|queueTracks|historyItems|lyricLines|audioDevices)\s*=\s*response\.",
+            r"(?:providers|providerPlaylists|providerResults|searchFavorites|queueTracks|historyItems|lyricLines|audioDevices|libraryArtists|libraryAlbums|libraryTracks|librarySorts)\s*=\s*response\.",
         )
         for normalizer in (
             "normalizeProviders",
@@ -50,6 +52,9 @@ class QmlSecurityContractTests(unittest.TestCase):
             "normalizeHistory",
             "normalizeLyrics",
             "normalizeDevices",
+            "normalizeLibraryArtists",
+            "normalizeLibraryAlbums",
+            "normalizeLibrarySorts",
         ):
             self.assertIn(normalizer, self.bar)
         self.assertIn("maxIpcQueueItems", self.bar)
@@ -103,9 +108,48 @@ class QmlSecurityContractTests(unittest.TestCase):
         self.assertIn("failureCount >= 6", self.bands)
 
     def test_text_inputs_have_explicit_limits(self):
-        self.assertEqual(self.panel.count("TextInput {"), 2)
-        self.assertIn("maximumLength: 256", self.panel)
-        self.assertIn("maximumLength: 4096", self.panel)
+        # Provider search, Library search and the queue input.
+        self.assertEqual(self.panel.count("TextInput {"), 3)
+        self.assertEqual(self.panel.count("maximumLength: 256"), 2)
+        self.assertEqual(self.panel.count("maximumLength: 4096"), 1)
+        # Every input must stop the panel shortcuts from taking its keys.
+        blocked = re.search(r"blocked:\s*([^\n]+)", self.panel).group(1)
+        for field in ("queueInput", "providerSearch", "librarySearch"):
+            self.assertIn(f"{field}.activeFocus", blocked)
+
+    def test_library_tab_replaces_files_and_the_pickers_moved_to_queue(self):
+        tabs = re.search(r"model:\s*\[(.*?)\]\s*Rectangle", self.panel, re.S).group(1)
+        self.assertIn('key: "library"', tabs)
+        self.assertNotIn('key: "files"', tabs)
+        self.assertEqual(tabs.count("key:"), 5)
+        # The picker returns to Queue, where its buttons and status now live.
+        self.assertNotIn('libraryTab = "files"', self.panel)
+        self.assertNotIn('libraryTab === "files"', self.panel)
+        self.assertIn("CHOOSE FILES", self.panel)
+        self.assertIn("ADD FOLDER", self.panel)
+        self.assertIn('requested === "files" ? "queue"', self.bar)
+
+    def test_library_requests_use_bounded_provider_kinds(self):
+        for kind in ("libArtists", "libAlbums", "libTracks", "libSearch", "libLoad"):
+            with self.subTest(kind=kind):
+                self.assertIn(f'kind === "{kind}"', self.bar)
+        self.assertIn("|| isLibraryKind(kind)", self.bar)
+        self.assertIn("root.libraryError = message", self.bar)
+        self.assertIn("function libraryRequestIsCurrent(item)", self.bar)
+        # Every resident Library list is capped.
+        self.assertIn("slice(0, root.maxLibraryItems)", self.bar)
+
+    def test_every_command_sent_by_qml_is_in_the_helper_allowlist(self):
+        sent = set(re.findall(r'cmd:\s*"([A-Za-z_.]+)"', self.bar + self.panel))
+        self.assertIn("provider.artists", sent)
+        self.assertIn("provider.load_album", sent)
+        for command in sorted(sent):
+            with self.subTest(command=command):
+                try:
+                    normalize_request({"cmd": command})
+                except ValidationError as error:
+                    # Missing fields are fine here; an unknown command is not.
+                    self.assertNotIn("unsupported IPC command", str(error))
 
 
 if __name__ == "__main__":

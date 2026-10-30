@@ -100,7 +100,7 @@ Panel {
         if (root.destroying) return
         root.filePickerStatus = "Could not start the bounded file picker."
         root.filePickerFailed = true
-        root.libraryTab = "files"
+        root.libraryTab = "queue"
         root.open()
       }
     }
@@ -116,7 +116,7 @@ Panel {
         root.filePickerFailed = true
         root.audioPickerTimedOut = false
         if (!root.destroying) {
-          root.libraryTab = "files"
+          root.libraryTab = "queue"
           root.open()
         }
         return
@@ -124,7 +124,7 @@ Panel {
       if (response && response.cancelled) {
         root.filePickerStatus = root.pickerMode === "folder" ? "No folder selected." : "No files selected."
         root.filePickerFailed = false
-        root.libraryTab = "files"
+        root.libraryTab = "queue"
         root.open()
         return
       }
@@ -132,7 +132,7 @@ Panel {
         root.filePickerStatus = response && response.error && root.hostWidget
           ? root.hostWidget.cleanText(response.error, 1024) : "File picker did not return a result."
         root.filePickerFailed = true
-        root.libraryTab = "files"
+        root.libraryTab = "queue"
         root.open()
         return
       }
@@ -205,7 +205,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: queueInput.activeFocus || providerSearch.activeFocus
+      blocked: queueInput.activeFocus || providerSearch.activeFocus || librarySearch.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onActivateRequested: if (root.hostWidget) root.hostWidget.togglePlayback()
@@ -371,7 +371,7 @@ Panel {
                 { key: "favorites", label: "FAVORITES" },
                 { key: "providers", label: "BROWSE" },
                 { key: "queue", label: "QUEUE" },
-                { key: "files", label: "FILES" },
+                { key: "library", label: "LIBRARY" },
                 { key: "more", label: "MORE" }
               ]
               Rectangle {
@@ -405,6 +405,8 @@ Panel {
                       root.hostWidget.refreshProviders()
                     else if (modelData.key === "queue" && root.hostWidget)
                       root.hostWidget.refreshQueue()
+                    else if (modelData.key === "library" && root.hostWidget)
+                      root.hostWidget.showLibrary(true)
                     else if (modelData.key === "more" && root.hostWidget) {
                       root.hostWidget.refreshHistory()
                       root.hostWidget.refreshLyrics()
@@ -1261,7 +1263,7 @@ Panel {
                 ? "This CLIAMP source exposes collections but no search endpoint."
                 : root.hostWidget && root.hostWidget.selectedProviderKey === "radio"
                   ? "Search finds stations inside CLIAMP's Radio provider."
-                  : "Search matches CLIAMP's Local library—not a folder path. Use Files to browse your disk."
+                  : "Search matches CLIAMP's Local library—not a folder path. Use the Library tab for your indexed folders, or Queue to add files from your disk."
               color: root.sand
               opacity: 0.88
               font.family: root.panelFont
@@ -1514,6 +1516,438 @@ Panel {
           }
 
           Column {
+            id: libraryBody
+            width: parent.width
+            spacing: Style.space(8)
+            visible: root.libraryTab === "library"
+            readonly property var host: root.hostWidget
+            readonly property bool available: host && host.libraryAvailable
+            readonly property string view: host ? host.libraryView : "artists"
+            readonly property bool browsing: view === "artists" || view === "albums"
+            readonly property bool cardsView: browsing || view === "artistAlbums"
+            readonly property bool tracksView: view === "tracks" || view === "search"
+
+            SafeText {
+              visible: !libraryBody.available
+              width: parent.width
+              text: libraryBody.host && libraryBody.host.providerBusy
+                ? "LOADING SOURCES…"
+                : "The Library is not available. It needs a CLIAMP build with the Library provider, and a [library] section in CLIAMP's config.toml that lists your music folders in paths."
+              color: root.sand
+              opacity: 0.88
+              font.family: root.panelFont
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              visible: libraryBody.available
+              Rectangle {
+                width: parent.width - librarySearchButton.width - Style.space(8)
+                height: Style.space(36)
+                radius: Style.cornerRadius
+                color: root.tint(root.night, 0.5)
+                border.width: 1
+                border.color: librarySearch.activeFocus ? root.turquoise : root.tint(root.sand, 0.34)
+                TextInput {
+                  id: librarySearch
+                  maximumLength: 256
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  verticalAlignment: TextInput.AlignVCenter
+                  color: root.sand
+                  selectionColor: root.adobe
+                  selectedTextColor: root.sand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.bodySmall
+                  clip: true
+                  SafeText {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: librarySearch.text === "" && !librarySearch.activeFocus
+                    text: "SEARCH TITLE, ARTIST OR ALBUM…"
+                    color: root.sand
+                    opacity: 0.82
+                    font: librarySearch.font
+                  }
+                  Keys.onReturnPressed: {
+                    if (root.hostWidget) root.hostWidget.searchLibrary(text)
+                    root.returnToPanelKeys()
+                  }
+                  Keys.onUpPressed: if (root.hostWidget) root.hostWidget.adjustVolume(2)
+                  Keys.onDownPressed: if (root.hostWidget) root.hostWidget.adjustVolume(-2)
+                  Keys.onEscapePressed: root.returnToPanelKeys()
+                }
+              }
+              Rectangle {
+                id: librarySearchButton
+                width: Style.space(84)
+                height: Style.space(36)
+                radius: Style.cornerRadius
+                color: root.tint(root.turquoise, 0.18)
+                border.width: 1
+                border.color: root.turquoise
+                SafeText {
+                  anchors.centerIn: parent
+                  text: libraryBody.host && libraryBody.host.providerBusy ? "WAIT…" : "SEARCH"
+                  color: root.sand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (root.hostWidget) root.hostWidget.searchLibrary(librarySearch.text)
+                    root.returnToPanelKeys()
+                  }
+                }
+              }
+            }
+
+            Row {
+              id: libraryChipRow
+              width: parent.width
+              spacing: Style.space(8)
+              visible: libraryBody.available && libraryBody.browsing
+              Repeater {
+                model: [
+                  { key: "artists", label: "ARTISTS" },
+                  { key: "albums", label: "ALBUMS" }
+                ]
+                Rectangle {
+                  required property var modelData
+                  readonly property bool selected: libraryBody.host
+                    && libraryBody.host.libraryTop === modelData.key
+                  width: Style.space(110)
+                  height: Style.space(32)
+                  radius: Style.cornerRadius
+                  color: selected ? root.tint(root.turquoise, 0.16) : "transparent"
+                  border.width: 1
+                  border.color: selected ? root.turquoise : root.tint(root.mutedSand, 0.3)
+                  SafeText {
+                    anchors.centerIn: parent
+                    text: modelData.label
+                    color: selected ? root.sand : root.mutedSand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.caption
+                    font.bold: selected
+                    font.letterSpacing: 1.1
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget) root.hostWidget.showLibraryTop(modelData.key)
+                  }
+                }
+              }
+              Rectangle {
+                visible: libraryBody.view === "albums" && libraryBody.host
+                  && libraryBody.host.librarySorts.length > 1
+                width: Style.space(200)
+                height: Style.space(32)
+                radius: Style.cornerRadius
+                color: sortMouse.containsMouse ? root.tint(root.adobe, 0.2) : root.tint(root.adobe, 0.1)
+                border.width: 1
+                border.color: root.adobe
+                SafeText {
+                  anchors.centerIn: parent
+                  width: parent.width - Style.space(16)
+                  text: libraryBody.host ? "SORT: " + libraryBody.host.librarySortLabel.toUpperCase() : ""
+                  color: root.sand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  horizontalAlignment: Text.AlignHCenter
+                  elide: Text.ElideRight
+                }
+                MouseArea {
+                  id: sortMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: if (root.hostWidget) root.hostWidget.cycleLibrarySort()
+                }
+              }
+            }
+
+            Row {
+              id: libraryTitleRow
+              width: parent.width
+              spacing: Style.space(8)
+              visible: libraryBody.available && !libraryBody.browsing
+              Rectangle {
+                id: libraryBackButton
+                width: Style.space(84)
+                height: Style.space(34)
+                radius: Style.cornerRadius
+                color: backMouse.containsMouse ? root.tint(root.turquoise, 0.18) : "transparent"
+                border.width: 1
+                border.color: root.turquoise
+                SafeText {
+                  anchors.centerIn: parent
+                  text: "‹ BACK"
+                  color: root.sand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea {
+                  id: backMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: if (root.hostWidget) root.hostWidget.libraryBack()
+                }
+              }
+              SafeText {
+                width: parent.width - libraryBackButton.width - libraryPlayAlbum.width - parent.spacing * 2
+                anchors.verticalCenter: parent.verticalCenter
+                text: !libraryBody.host ? "" : libraryBody.view === "artistAlbums"
+                  ? libraryBody.host.libraryArtistName.toUpperCase()
+                  : libraryBody.view === "tracks"
+                    ? libraryBody.host.libraryAlbumName.toUpperCase()
+                    : "RESULTS FOR “" + libraryBody.host.librarySearchQuery.toUpperCase() + "”"
+                color: root.turquoise
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.1
+                elide: Text.ElideRight
+                maximumLineCount: 1
+              }
+              Rectangle {
+                id: libraryPlayAlbum
+                visible: libraryBody.view === "tracks"
+                width: visible ? Style.space(120) : 0
+                height: Style.space(34)
+                radius: Style.cornerRadius
+                color: playAlbumMouse.containsMouse ? root.tint(root.adobe, 0.28) : root.tint(root.adobe, 0.15)
+                border.width: 1
+                border.color: root.adobe
+                SafeText {
+                  anchors.centerIn: parent
+                  text: "PLAY ALBUM"
+                  color: root.sand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea {
+                  id: playAlbumMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  enabled: libraryBody.host && libraryBody.host.libraryTracks.length > 0
+                  onClicked: if (root.hostWidget) root.hostWidget.playLibraryAlbum(0)
+                }
+              }
+            }
+
+            Grid {
+              id: libraryGrid
+              width: parent.width
+              columns: 2
+              spacing: Style.space(7)
+              visible: libraryBody.available && libraryBody.cardsView
+              Repeater {
+                model: libraryBody.host ? libraryBody.host.libraryCards : []
+                Rectangle {
+                  id: libraryCard
+                  required property var modelData
+                  width: (libraryGrid.width - libraryGrid.spacing) / 2
+                  height: Style.space(52)
+                  radius: Style.cornerRadius
+                  color: libraryCardMouse.containsMouse ? root.tint(root.adobe, 0.18) : root.tint(root.night, 0.46)
+                  border.width: 1
+                  border.color: libraryCardMouse.containsMouse ? root.adobe : root.tint(root.sand, 0.3)
+                  Column {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.leftMargin: Style.space(12)
+                    anchors.rightMargin: Style.space(12)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(2)
+                    SafeText {
+                      width: parent.width
+                      text: libraryCard.modelData.title.toUpperCase()
+                      color: root.sand
+                      font.family: root.panelFont
+                      font.pixelSize: Style.font.bodySmall
+                      elide: Text.ElideRight
+                      maximumLineCount: 1
+                    }
+                    SafeText {
+                      width: parent.width
+                      visible: libraryCard.modelData.detail !== ""
+                      text: libraryCard.modelData.detail
+                      color: root.mutedSand
+                      font.family: root.panelFont
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                      maximumLineCount: 1
+                    }
+                  }
+                  MouseArea {
+                    id: libraryCardMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      if (!root.hostWidget) return
+                      if (libraryCard.modelData.kind === "artist")
+                        root.hostWidget.openLibraryArtist(libraryCard.modelData.id, libraryCard.modelData.title)
+                      else
+                        root.hostWidget.openLibraryAlbum(libraryCard.modelData.id, libraryCard.modelData.title)
+                    }
+                  }
+                }
+              }
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(5)
+              visible: libraryBody.available && libraryBody.tracksView
+              Repeater {
+                model: libraryBody.host ? libraryBody.host.libraryTracks : []
+                Rectangle {
+                  id: libraryRow
+                  required property var modelData
+                  required property int index
+                  width: libraryBody.width
+                  height: Style.space(38)
+                  radius: Style.cornerRadius
+                  color: libraryRowMouse.containsMouse ? root.tint(root.turquoise, 0.1) : "transparent"
+                  border.width: 1
+                  border.color: libraryRowMouse.containsMouse
+                    ? root.tint(root.turquoise, 0.55) : root.tint(root.sand, 0.18)
+                  SafeText {
+                    id: libraryRowNumber
+                    width: libraryBody.view === "tracks" ? Style.space(34) : 0
+                    visible: libraryBody.view === "tracks"
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: ("0" + (libraryRow.modelData.track_number || libraryRow.index + 1)).slice(-2)
+                    color: root.mutedSand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.caption
+                  }
+                  SafeText {
+                    anchors.left: libraryRowNumber.right
+                    anchors.right: libraryRowDetail.left
+                    anchors.leftMargin: libraryBody.view === "tracks" ? Style.space(4) : Style.space(10)
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: libraryRow.modelData.title || libraryRow.modelData.path
+                    color: root.sand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.bodySmall
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
+                  }
+                  SafeText {
+                    id: libraryRowDetail
+                    width: parent.width * 0.3
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(10)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: libraryBody.view === "search"
+                      ? [libraryRow.modelData.artist, libraryRow.modelData.album]
+                          .filter(function(value) { return !!value }).join("  ·  ")
+                      : root.clock(libraryRow.modelData.duration_secs)
+                    visible: text !== "" && text !== "0:00"
+                    color: root.sand
+                    opacity: 0.86
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.caption
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
+                  }
+                  MouseArea {
+                    id: libraryRowMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      if (!root.hostWidget) return
+                      if (libraryBody.view === "tracks") root.hostWidget.playLibraryAlbum(libraryRow.index)
+                      else root.hostWidget.playProviderTrack(libraryRow.modelData)
+                    }
+                  }
+                }
+              }
+            }
+
+            Rectangle {
+              visible: libraryBody.available && libraryBody.cardsView && libraryBody.host
+                && libraryBody.host.libraryHasMore
+              width: parent.width
+              height: Style.space(40)
+              radius: Style.cornerRadius
+              color: moreMouse.containsMouse ? root.tint(root.turquoise, 0.2) : root.tint(root.turquoise, 0.1)
+              border.width: 1
+              border.color: root.turquoise
+              SafeText {
+                anchors.centerIn: parent
+                text: libraryBody.host && libraryBody.host.providerBusy ? "LOADING…" : "LOAD MORE"
+                color: root.sand
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+              MouseArea {
+                id: moreMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (root.hostWidget && !root.hostWidget.providerBusy) root.hostWidget.loadLibraryPage(false)
+              }
+            }
+
+            SafeText {
+              visible: libraryBody.available && libraryBody.host && libraryBody.host.providerBusy
+                && !libraryBody.host.libraryLoaded
+              text: "LOADING…"
+              color: root.sand
+              opacity: 0.88
+              font.family: root.panelFont
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            SafeText {
+              visible: libraryBody.available && libraryBody.host && libraryBody.host.libraryLoaded
+                && !libraryBody.host.providerBusy
+                && ((libraryBody.cardsView && libraryBody.host.libraryCards.length === 0)
+                  || (libraryBody.tracksView && libraryBody.host.libraryTracks.length === 0))
+              width: parent.width
+              text: libraryBody.view === "search" ? "No matching tracks."
+                : libraryBody.view === "tracks" ? "This album has no tracks."
+                : "Nothing is indexed yet. The first scan of a large share can take several minutes; press the LIBRARY tab again to check."
+              color: root.sand
+              opacity: 0.88
+              font.family: root.panelFont
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            SafeText {
+              visible: libraryBody.host && libraryBody.host.libraryError !== ""
+              width: parent.width
+              text: libraryBody.host ? libraryBody.host.libraryError : ""
+              color: root.adobe
+              font.family: root.panelFont
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+          }
+
+          Column {
             width: parent.width
             spacing: Style.space(10)
             visible: root.libraryTab === "more"
@@ -1635,79 +2069,6 @@ Panel {
               font.pixelSize: Style.font.bodySmall
               lineHeight: 1.2
               wrapMode: Text.WordWrap
-            }
-          }
-
-          Rectangle {
-            width: parent.width
-            height: browserFlick.height
-            radius: Style.cornerRadius
-            visible: root.libraryTab === "files"
-            color: root.tint(root.night, 0.48)
-            border.width: 1
-            border.color: root.tint(root.turquoise, 0.28)
-            Column {
-              anchors.centerIn: parent
-              width: parent.width - Style.space(28)
-              spacing: Style.space(8)
-              SafeText {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: "PLAY LOCAL AUDIO"
-                color: root.sand
-                font.family: root.panelFont
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
-              }
-              Row {
-                id: fileActionRow
-                width: parent.width
-                spacing: Style.space(8)
-                Repeater {
-                  model: [
-                    { mode: "files", label: "CHOOSE FILES…" },
-                    { mode: "folder", label: "ADD FOLDER…" }
-                  ]
-                  Rectangle {
-                    required property var modelData
-                    readonly property bool available: root.hostWidget && root.hostWidget.sessionReady
-                    width: (fileActionRow.width - fileActionRow.spacing) / 2
-                    height: Style.space(46)
-                    radius: Style.cornerRadius
-                    color: pickerMouse.containsMouse
-                      ? root.tint(root.adobe, 0.22) : root.tint(root.adobe, 0.12)
-                    border.width: 1
-                    border.color: root.tint(root.adobe, available ? 1 : 0.3)
-                    SafeText {
-                      anchors.centerIn: parent
-                      text: modelData.label
-                      color: available ? root.sand : root.mutedSand
-                      opacity: available ? 1 : 0.5
-                      font.family: root.panelFont
-                      font.pixelSize: Style.font.caption
-                      font.bold: true
-                    }
-                    MouseArea {
-                      id: pickerMouse
-                      anchors.fill: parent
-                      enabled: parent.available
-                      hoverEnabled: true
-                      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                      onClicked: root.launchAudioPicker(modelData.mode)
-                    }
-                  }
-                }
-              }
-              SafeText {
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: Math.min(browserColumn.width - Style.space(30), implicitWidth)
-                visible: root.filePickerStatus !== ""
-                text: root.filePickerStatus
-                color: root.filePickerFailed ? root.adobe : root.turquoise
-                font.family: root.panelFont
-                font.pixelSize: Style.font.caption
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-              }
             }
           }
 
@@ -1838,6 +2199,69 @@ Panel {
                   root.returnToPanelKeys()
                 }
               }
+            }
+          }
+
+          Column {
+            id: pickerBlock
+            width: parent.width
+            spacing: Style.space(6)
+            visible: root.libraryTab === "queue"
+            SafeText {
+              text: "ADD AUDIO FROM THIS COMPUTER"
+              color: root.turquoise
+              font.family: root.panelFont
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+            }
+            Row {
+              id: fileActionRow
+              width: parent.width
+              spacing: Style.space(8)
+              Repeater {
+                model: [
+                  { mode: "files", label: "CHOOSE FILES…" },
+                  { mode: "folder", label: "ADD FOLDER…" }
+                ]
+                Rectangle {
+                  required property var modelData
+                  readonly property bool available: root.hostWidget && root.hostWidget.sessionReady
+                  width: (fileActionRow.width - fileActionRow.spacing) / 2
+                  height: Style.space(38)
+                  radius: Style.cornerRadius
+                  color: pickerMouse.containsMouse
+                    ? root.tint(root.adobe, 0.22) : root.tint(root.adobe, 0.12)
+                  border.width: 1
+                  border.color: root.tint(root.adobe, available ? 1 : 0.3)
+                  SafeText {
+                    anchors.centerIn: parent
+                    text: modelData.label
+                    color: available ? root.sand : root.mutedSand
+                    opacity: available ? 1 : 0.5
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+                  MouseArea {
+                    id: pickerMouse
+                    anchors.fill: parent
+                    enabled: parent.available
+                    hoverEnabled: true
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: root.launchAudioPicker(modelData.mode)
+                  }
+                }
+              }
+            }
+            SafeText {
+              width: parent.width
+              visible: root.filePickerStatus !== ""
+              text: root.filePickerStatus
+              color: root.filePickerFailed ? root.adobe : root.turquoise
+              font.family: root.panelFont
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 

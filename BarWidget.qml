@@ -59,6 +59,30 @@ BarWidget {
   property string providerRequestKind: ""
   property bool providerBusy: false
   property bool providerSearchAttempted: false
+  // The Library is CLIAMP's indexed folders, such as a share on a NAS. Its
+  // views never touch the Browse state above.
+  readonly property string libraryProviderKey: "library"
+  readonly property int libraryPageSize: 60
+  readonly property int maxLibraryItems: 600
+  property string libraryTop: "artists"
+  property string libraryView: "artists"
+  property string libraryReturnView: "artists"
+  property var libraryArtists: []
+  property var libraryAlbums: []
+  property var libraryTracks: []
+  property var librarySorts: []
+  property string librarySort: ""
+  property string libraryArtistId: ""
+  property string libraryArtistName: ""
+  property string libraryAlbumId: ""
+  property string libraryAlbumName: ""
+  property string librarySearchQuery: ""
+  property bool librarySearchAttempted: false
+  property bool libraryArtistsMore: false
+  property bool libraryAlbumsMore: false
+  property bool libraryLoaded: false
+  property int libraryPendingIndex: 0
+  property string libraryError: ""
   property int radioCatalogOffset: 0
   property bool radioCatalogHasMore: true
   property bool radioCatalogRequested: false
@@ -105,6 +129,46 @@ BarWidget {
   })
 
   readonly property bool playing: state === "playing"
+  readonly property bool libraryAvailable: {
+    for (var i = 0; i < providers.length; ++i) {
+      var entry = providers[i]
+      if (entry.key === libraryProviderKey && entry.browse_artists && entry.browse_albums) return true
+    }
+    return false
+  }
+  // The cards of the Library view that lists artists or albums.
+  readonly property var libraryCards: {
+    var cards = []
+    if (libraryView === "artists") {
+      for (var i = 0; i < libraryArtists.length; ++i) {
+        var artist = libraryArtists[i]
+        cards.push({
+          kind: "artist", id: artist.id, title: artist.name,
+          detail: artist.album_count + (artist.album_count === 1 ? " ALBUM" : " ALBUMS")
+        })
+      }
+    } else if (libraryView === "albums" || libraryView === "artistAlbums") {
+      for (var j = 0; j < libraryAlbums.length; ++j) {
+        var album = libraryAlbums[j]
+        var parts = []
+        if (libraryView === "albums" && album.artist) parts.push(album.artist)
+        if (album.year) parts.push(String(album.year))
+        if (album.track_count) parts.push(album.track_count + (album.track_count === 1 ? " TRACK" : " TRACKS"))
+        cards.push({ kind: "album", id: album.id, title: album.name, detail: parts.join("  ·  ") })
+      }
+    }
+    return cards
+  }
+  // Whether the list on screen has another page. The lists keep their own
+  // flags, so returning to a fully loaded list never offers a stale page.
+  readonly property bool libraryHasMore: libraryView === "artists" ? libraryArtistsMore
+    : (libraryView === "albums" || libraryView === "artistAlbums") ? libraryAlbumsMore : false
+  readonly property string librarySortLabel: {
+    // An empty sort is CLIAMP's default, which the provider lists first.
+    for (var i = 0; i < librarySorts.length; ++i)
+      if (librarySorts[i].id === librarySort) return librarySorts[i].label
+    return librarySorts.length ? librarySorts[0].label : ""
+  }
   readonly property var providerCollections: {
     var collections = []
     for (var i = 0; i < providerPlaylists.length && collections.length < maxPlaylistItems; ++i) {
@@ -342,6 +406,59 @@ BarWidget {
     return result
   }
 
+  function normalizeLibraryArtists(value) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    var used = 0
+    for (var i = 0; i < Math.min(value.length, 200); ++i) {
+      var item = value[i]
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue
+      var id = opaqueText(item.id, 512)
+      if (!id) continue
+      var name = cleanText(item.name, 256) || id
+      if (used + id.length + name.length > maxModelCharacters) break
+      used += id.length + name.length
+      result.push({ id: id, name: name, album_count: cleanInteger(item.album_count, 0, 1000000, 0) })
+    }
+    return result
+  }
+
+  function normalizeLibraryAlbums(value) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    var used = 0
+    for (var i = 0; i < Math.min(value.length, 200); ++i) {
+      var item = value[i]
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue
+      var id = opaqueText(item.id, 512)
+      if (!id) continue
+      var name = cleanText(item.name, 256) || id
+      var artist = cleanText(item.artist, 256)
+      if (used + id.length + name.length + artist.length > maxModelCharacters) break
+      used += id.length + name.length + artist.length
+      result.push({
+        id: id,
+        name: name,
+        artist: artist,
+        year: cleanInteger(item.year, 0, 9999, 0),
+        track_count: cleanInteger(item.track_count, 0, 1000000, 0)
+      })
+    }
+    return result
+  }
+
+  function normalizeLibrarySorts(value) {
+    if (!Array.isArray(value)) return []
+    var result = []
+    for (var i = 0; i < Math.min(value.length, 16); ++i) {
+      var item = value[i]
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue
+      var id = opaqueText(item.id, 64)
+      if (id) result.push({ id: id, label: cleanText(item.label, 64) || id })
+    }
+    return result
+  }
+
   function normalizeHistory(value) {
     if (!Array.isArray(value)) return []
     var result = []
@@ -456,9 +573,15 @@ BarWidget {
     else toggleProviderFavorite(item.id)
   }
 
+  function isLibraryKind(kind) {
+    return kind === "libArtists" || kind === "libAlbums" || kind === "libTracks"
+      || kind === "libSearch" || kind === "libLoad"
+  }
+
   function isProviderKind(kind) {
     return kind === "providers" || kind === "playlists" || kind === "catalog"
       || kind === "favorite" || kind === "search" || kind === "load" || kind === "urlLoad"
+      || isLibraryKind(kind)
   }
 
   function syncProviderBusy() {
@@ -488,7 +611,7 @@ BarWidget {
     var pending = ipcQueue.slice()
     // Polls and slider updates are snapshots. Keep only their newest pending
     // value so an unavailable peer cannot grow the resident work queue.
-    if (["status", "queueList", "history", "lyrics", "devices", "volumeAction", "search"].indexOf(kind) >= 0) {
+    if (["status", "queueList", "history", "lyrics", "devices", "volumeAction", "search", "libSearch"].indexOf(kind) >= 0) {
       var compacted = []
       for (var i = 0; i < pending.length; ++i)
         if (pending[i].kind !== kind) compacted.push(pending[i])
@@ -563,6 +686,8 @@ BarWidget {
       sessionReady = false
       modeKnown = false
       if (!daemon.running && !startingDaemon && !destroying) startOwnedDaemon(false)
+    } else if (isLibraryKind(kind)) {
+      libraryError = "Could not start the bounded CLIAMP helper."
     } else if (isProviderKind(kind)) {
       providerError = "Could not start the bounded CLIAMP helper."
     } else {
@@ -627,6 +752,151 @@ BarWidget {
     if (!safeId) return
     runProviderRequest("favorite", {
       cmd: "provider.favorite", provider: "radio", playlist: safeId
+    })
+  }
+
+  function runLibraryRequest(kind, request) {
+    libraryError = ""
+    return enqueueIpc(kind, request, [])
+  }
+
+  // True when a response still belongs to what the Library view shows. The
+  // queue is serial, but the user can change the view while a request waits.
+  function libraryRequestIsCurrent(item) {
+    if (!item || !item.request) return false
+    var request = item.request
+    if (request.cmd === "provider.artists") return libraryView === "artists"
+    if (request.cmd === "provider.albums")
+      return libraryView === "albums" && String(request.sort || "") === librarySort
+    if (request.cmd === "provider.artist_albums")
+      return libraryView === "artistAlbums" && request.artist === libraryArtistId
+    if (request.cmd === "provider.album_tracks")
+      return libraryView === "tracks" && request.album === libraryAlbumId
+    if (request.cmd === "provider.search")
+      return libraryView === "search" && request.query === librarySearchQuery
+    return false
+  }
+
+  function showLibrary(force) {
+    if (!providers.length) {
+      refreshProviders()
+      return
+    }
+    if (!libraryAvailable) return
+    if (libraryView === "artists" || libraryView === "albums") {
+      if (force || (libraryView === "artists" ? !libraryArtists.length : !libraryAlbums.length))
+        loadLibraryPage(true)
+    }
+  }
+
+  function loadLibraryPage(reset) {
+    if (!libraryAvailable) return
+    var view = libraryView
+    var offset = 0
+    if (!reset) offset = view === "artists" ? libraryArtists.length : libraryAlbums.length
+    var request = null
+    if (view === "artists") {
+      request = { cmd: "provider.artists", provider: libraryProviderKey, offset: offset, limit: libraryPageSize }
+    } else if (view === "albums") {
+      request = { cmd: "provider.albums", provider: libraryProviderKey, offset: offset, limit: libraryPageSize }
+      if (librarySort) request.sort = librarySort
+    } else if (view === "artistAlbums" && libraryArtistId) {
+      request = {
+        cmd: "provider.artist_albums", provider: libraryProviderKey,
+        artist: libraryArtistId, offset: offset, limit: libraryPageSize
+      }
+    }
+    if (!request) return
+    if (reset) {
+      libraryLoaded = false
+      if (view === "artists") libraryArtistsMore = false
+      else libraryAlbumsMore = false
+    }
+    runLibraryRequest(view === "artists" ? "libArtists" : "libAlbums", request)
+  }
+
+  function showLibraryTop(top) {
+    libraryTop = top === "albums" ? "albums" : "artists"
+    libraryView = libraryTop
+    librarySearchAttempted = false
+    libraryError = ""
+    if (libraryTop === "artists") {
+      libraryLoaded = libraryArtists.length > 0
+      if (!libraryArtists.length) loadLibraryPage(true)
+    } else {
+      libraryAlbums = []
+      loadLibraryPage(true)
+    }
+  }
+
+  function openLibraryArtist(id, name) {
+    var safeId = opaqueText(id, 512)
+    if (!safeId) return
+    libraryArtistId = safeId
+    libraryArtistName = cleanText(name, 256)
+    libraryView = "artistAlbums"
+    libraryAlbums = []
+    loadLibraryPage(true)
+  }
+
+  function openLibraryAlbum(id, name) {
+    var safeId = opaqueText(id, 512)
+    if (!safeId) return
+    libraryAlbumId = safeId
+    libraryAlbumName = cleanText(name, 256)
+    libraryReturnView = libraryView
+    libraryView = "tracks"
+    libraryTracks = []
+    libraryLoaded = false
+    runLibraryRequest("libTracks", {
+      cmd: "provider.album_tracks", provider: libraryProviderKey,
+      album: safeId, offset: 0, limit: 200
+    })
+  }
+
+  function libraryBack() {
+    libraryError = ""
+    if (libraryView === "tracks") {
+      libraryView = libraryReturnView
+      libraryLoaded = true
+    } else if (libraryView === "artistAlbums") {
+      libraryView = "artists"
+      libraryLoaded = libraryArtists.length > 0
+    } else if (libraryView === "search") {
+      librarySearchAttempted = false
+      showLibraryTop(libraryTop)
+    }
+  }
+
+  function searchLibrary(query) {
+    var value = cleanText(query, 256).trim()
+    if (!value || !libraryAvailable) return
+    librarySearchQuery = value
+    libraryView = "search"
+    libraryTracks = []
+    librarySearchAttempted = true
+    runLibraryRequest("libSearch", {
+      cmd: "provider.search", provider: libraryProviderKey, query: value, limit: 50
+    })
+  }
+
+  function cycleLibrarySort() {
+    if (librarySorts.length < 2 || libraryView !== "albums") return
+    var index = 0
+    for (var i = 0; i < librarySorts.length; ++i)
+      if (librarySorts[i].id === librarySort) index = i
+    librarySort = librarySorts[(index + 1) % librarySorts.length].id
+    libraryAlbums = []
+    loadLibraryPage(true)
+  }
+
+  // Loads the open album into the queue and plays it from startIndex.
+  function playLibraryAlbum(startIndex) {
+    if (!libraryAlbumId) return
+    libraryPendingIndex = cleanInteger(startIndex, 0, 1000000, 0)
+    loadedProviderPlaylistId = ""
+    runLibraryRequest("libLoad", {
+      cmd: "provider.load_album", provider: libraryProviderKey, album: libraryAlbumId
     })
   }
 
@@ -909,12 +1179,15 @@ BarWidget {
     if (!target) return "unavailable"
     var requested = String(tab || "favorites")
     requested = requested === "radio" || requested === "browse" ? "providers" : requested
-    if (["favorites", "providers", "queue", "files", "more"].indexOf(requested) < 0)
+    // The Files tab moved into Queue; keep the old name working for scripts.
+    requested = requested === "files" ? "queue" : requested
+    if (["favorites", "providers", "queue", "library", "more"].indexOf(requested) < 0)
       return "invalid tab"
     target.libraryTab = requested
     if (target.libraryTab === "favorites") showFavorites()
     else if (target.libraryTab === "providers" && !providers.length) refreshProviders()
     else if (target.libraryTab === "queue") refreshQueue()
+    else if (target.libraryTab === "library") showLibrary(true)
     else if (target.libraryTab === "more") {
       refreshHistory()
       refreshLyrics()
@@ -949,7 +1222,7 @@ BarWidget {
     id: panelLoader
     active: true
     // Keep this query aligned with manifest.json so Qt drops stale panel components on updates.
-    source: Qt.resolvedUrl("Panel.qml") + "?v=1.2.2"
+    source: Qt.resolvedUrl("Panel.qml") + "?v=1.3.0"
     visible: false
     onLoaded: {
       root.injectPanel()
@@ -1071,6 +1344,8 @@ BarWidget {
           root.sessionReady = false
           root.modeKnown = false
           if (!daemon.running && !root.startingDaemon && !root.destroying) root.startOwnedDaemon(false)
+        } else if (root.isLibraryKind(kind)) {
+          root.libraryError = message
         } else if (kind === "providers" || kind === "playlists" || kind === "catalog"
             || kind === "favorite" || kind === "search" || kind === "load" || kind === "urlLoad") {
           root.providerError = message
@@ -1097,6 +1372,7 @@ BarWidget {
           // Always refresh the selected source's collections after listing
           // providers. This also repairs state after a shell/plugin reload.
           root.selectProvider(nextProvider)
+          if (panelLoader.item && panelLoader.item.libraryTab === "library") root.showLibrary(false)
         }
       } else if (kind === "playlists") {
         root.providerError = ""
@@ -1144,6 +1420,53 @@ BarWidget {
         root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
         root.currentIndex = root.queueTracks.length ? 0 : -1
         actionRefresh.restart()
+      } else if (kind === "libArtists") {
+        if (root.libraryRequestIsCurrent(current)) {
+          var artistPage = root.normalizeLibraryArtists(response.artists)
+          var artistOffset = current.request.offset
+          root.libraryArtists = (artistOffset > 0 ? root.libraryArtists : [])
+            .concat(artistPage).slice(0, root.maxLibraryItems)
+          root.libraryArtistsMore = artistPage.length > 0
+            && artistOffset + artistPage.length < root.cleanInteger(response.total, 0, 1000000000, 0)
+            && root.libraryArtists.length < root.maxLibraryItems
+          root.libraryLoaded = true
+        }
+      } else if (kind === "libAlbums") {
+        if (root.libraryRequestIsCurrent(current)) {
+          var albumPage = root.normalizeLibraryAlbums(response.albums)
+          var albumOffset = current.request.offset
+          root.libraryAlbums = (albumOffset > 0 ? root.libraryAlbums : [])
+            .concat(albumPage).slice(0, root.maxLibraryItems)
+          if (response.sorts) root.librarySorts = root.normalizeLibrarySorts(response.sorts)
+          // CLIAMP's album list reports the size of the page, not the library,
+          // so a full page is the only sign that more albums follow.
+          var moreAlbums = current.request.cmd === "provider.albums"
+            ? albumPage.length >= root.libraryPageSize
+            : albumOffset + albumPage.length < root.cleanInteger(response.total, 0, 1000000000, 0)
+          root.libraryAlbumsMore = moreAlbums && albumPage.length > 0
+            && root.libraryAlbums.length < root.maxLibraryItems
+          root.libraryLoaded = true
+        }
+      } else if (kind === "libTracks") {
+        if (root.libraryRequestIsCurrent(current)) {
+          root.libraryTracks = root.normalizeTracks(response.tracks, 200)
+          root.libraryLoaded = true
+        }
+      } else if (kind === "libSearch") {
+        if (root.libraryRequestIsCurrent(current)) {
+          root.libraryTracks = root.normalizeTracks(response.tracks, 50)
+          root.libraryLoaded = true
+        }
+      } else if (kind === "libLoad") {
+        root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
+        root.currentIndex = root.queueTracks.length ? 0 : -1
+        var startAt = root.libraryPendingIndex
+        root.libraryPendingIndex = 0
+        if (startAt > 0 && startAt < root.queueTracks.length)
+          root.enqueueIpc("play", { cmd: "queue.play", index: startAt }, [])
+        else if (root.queueTracks.length)
+          root.enqueueIpc("action", { cmd: "play" }, ["play"])
+        actionRefresh.restart()
       } else if (kind === "queueList" || kind === "queueMutation") {
         root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
         if (response.index !== undefined)
@@ -1164,7 +1487,7 @@ BarWidget {
         actionRefresh.restart()
       }
       root.providerTimedOut = false
-      if (kind === "load" || kind === "play" || kind === "queueMutation") queueRefresh.restart()
+      if (kind === "load" || kind === "libLoad" || kind === "play" || kind === "queueMutation") queueRefresh.restart()
       root.finishIpc()
     }
   }

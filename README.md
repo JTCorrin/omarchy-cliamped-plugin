@@ -1,6 +1,6 @@
 # CLIAMPed
 
-CLIAMPed is a theme-aware Omarchy bar widget and control center for [CLIAMP](https://github.com/bjarneo/cliamp). It brings playback, radio discovery, favorites, collections, local media, and three reactive visualizers into the shell.
+CLIAMPed is a theme-aware Omarchy bar widget and control center for [CLIAMP](https://github.com/bjarneo/cliamp). It brings playback, radio discovery, favorites, collections, your own music library, local media, and three reactive visualizers into the shell.
 
 Its visualizer and controls take their colors from the current Omarchy theme rather than a bundled palette.
 
@@ -13,6 +13,7 @@ Its visualizer and controls take their colors from the current Omarchy theme rat
 - Live song titles and station context for any stream whose metadata CLIAMP exposes
 - CLIAMP source and collection browsing, including Radio Browser favorites and its paged catalog
 - Real queue inspection, play-next, removal, and clearing
+- A Library tab to search and browse the music folders that CLIAMP indexes, such as a share on a NAS, by artist and album
 - Multiple-file and recursive whole-folder playback
 - Recently played tracks, lyrics, and audio-output switching
 - Keyboard control while the panel is focused
@@ -43,9 +44,24 @@ CLIAMPed resolves CLIAMP Radio's built-in M3U index through CLIAMP's `url.load` 
 Now Playing and the bar show live song metadata from any station, including directory entries and custom URLs. The panel keeps the artist and station beneath the song title. Streams without live metadata retain their supplied title or station name.
 The Radio Browser directory loads automatically; use ☆ and ★ on directory or search-result cards to add or remove Favorites. Because CLIAMP's search IPC omits the playlist IDs required by its native favorite endpoint, searched-station favorites are stored separately in `~/.config/cliamp/cliamped_search_favorites.json` and merged into the same Favorites view.
 
+## Library
+
+The Library tab searches and browses the music that CLIAMP's Library provider has indexed: the folders you list under `[library]` in CLIAMP's `config.toml`, for example a NAS share that is mounted on this computer. CLIAMP does the scanning and keeps the index, so the tab shows the music at once, even while a scan runs.
+
+- **Artists** lists artists, then their albums, then the tracks of an album.
+- **Albums** lists every album. The sort button cycles the orders that CLIAMP offers, such as Recently Added.
+- The search box finds tracks by title, artist or album. Words may come in any order and accents do not count. Selecting a result plays it.
+- **Play Album** loads the open album into the Queue and plays it. Selecting a track in an album loads the album and starts at that track.
+
+Lists load 60 items at a time with **Load More**, and the panel keeps at most 600 items of a list. An album shows at most 200 tracks, and a search shows at most 50 results.
+
+The tab needs a CLIAMP build that has the Library provider, installed as `/usr/bin/cliamp`, and at least one folder under `[library]`. Without them the tab says that the Library is not available, and the other tabs work as before. New music appears after CLIAMP rescans: it scans at start, and `Ctrl+R` in the provider pane of the CLIAMP TUI scans again.
+
+The Library tab replaces the former Files tab. Its two buttons moved to the Queue tab.
+
 ## Local files and folders
 
-The Files tab offers **Choose Files…** and **Add Folder…**. CLIAMPed closes its layer panel before opening the native picker so the picker stays visible, then returns to Files on cancel/error or Queue after a successful selection. Folder imports:
+The Queue tab offers **Choose Files…** and **Add Folder…**, under the box that adds a path or URL. CLIAMPed closes its layer panel before opening the native picker so the picker stays visible, then returns to Queue. Folder imports:
 
 - recurse through subfolders;
 - sort paths in natural filename order (`2` before `10`);
@@ -103,11 +119,12 @@ Shell IPC:
 ```bash
 /usr/bin/omarchy-shell io.github.majesticio.cliamped open
 /usr/bin/omarchy-shell io.github.majesticio.cliamped tab browse
+/usr/bin/omarchy-shell io.github.majesticio.cliamped tab library
 /usr/bin/omarchy-shell io.github.majesticio.cliamped visualizer Pulse
 /usr/bin/omarchy-shell io.github.majesticio.cliamped close
 ```
 
-The `tab` endpoint accepts `favorites`, `browse`, `queue`, `files`, or `more`. The `visualizer` endpoint accepts `Spectrum`, `Canyon`, or `Pulse`.
+The `tab` endpoint accepts `favorites`, `browse`, `queue`, `library`, or `more`. The old name `files` opens `queue`. The `visualizer` endpoint accepts `Spectrum`, `Canyon`, or `Pulse`.
 
 ## Optional Codex skill
 
