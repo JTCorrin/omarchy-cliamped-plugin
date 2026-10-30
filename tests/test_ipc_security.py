@@ -11,10 +11,14 @@ import unittest
 
 import cliamp_ipc
 from cliamped_security import (
+    MAX_ALBUMS,
+    MAX_ARTISTS,
     MAX_PROVIDERS,
     MAX_TEXT_BYTES,
+    MAX_TRACKS,
     MAX_WIRE_RESPONSE_BYTES,
     ValidationError,
+    deadline_seconds_for_request,
     normalize_request,
     normalize_response,
 )
@@ -342,6 +346,132 @@ class SchemaBoundaryTests(unittest.TestCase):
             normalize_request({"cmd": "eq", "band": 2, "value": 1}),
             {"cmd": "eq", "band": 2, "value": 1},
         )
+
+    def test_library_browse_requests_have_exact_schemas(self):
+        accepted = {
+            ("provider.artists", ("provider", "offset", "limit")): (
+                {"cmd": "provider.artists", "provider": "library"},
+                {"cmd": "provider.artists", "provider": "library", "offset": 0, "limit": 18},
+            ),
+            ("provider.artist_albums", ()): (
+                {"cmd": "provider.artist_albums", "provider": "library", "artist": "31188982ff4b1850", "offset": 20, "limit": 50},
+                {"cmd": "provider.artist_albums", "provider": "library", "artist": "31188982ff4b1850", "offset": 20, "limit": 50},
+            ),
+            ("provider.albums", ()): (
+                {"cmd": "provider.albums", "provider": "library", "sort": "newest", "limit": 100},
+                {"cmd": "provider.albums", "provider": "library", "sort": "newest", "offset": 0, "limit": 100},
+            ),
+            ("provider.album_tracks", ()): (
+                {"cmd": "provider.album_tracks", "provider": "library", "album": "349462ad9813dcd6"},
+                {"cmd": "provider.album_tracks", "provider": "library", "album": "349462ad9813dcd6", "offset": 0, "limit": 18},
+            ),
+            ("provider.load_album", ()): (
+                {"cmd": "provider.load_album", "provider": "library", "album": "349462ad9813dcd6"},
+                {"cmd": "provider.load_album", "provider": "library", "album": "349462ad9813dcd6"},
+            ),
+        }
+        for (command, _), (request, expected) in accepted.items():
+            with self.subTest(command=command):
+                self.assertEqual(normalize_request(request), expected)
+
+        rejected = (
+            {"cmd": "provider.artists"},
+            {"cmd": "provider.artists", "provider": "library", "extra": 1},
+            {"cmd": "provider.artists", "provider": "library", "limit": 0},
+            {"cmd": "provider.artists", "provider": "library", "limit": MAX_ARTISTS + 1},
+            {"cmd": "provider.artists", "provider": "library", "offset": -1},
+            {"cmd": "provider.artists", "provider": "library", "offset": True},
+            {"cmd": "provider.artist_albums", "provider": "library"},
+            {"cmd": "provider.artist_albums", "provider": "library", "artist": ""},
+            {"cmd": "provider.artist_albums", "provider": "library", "artist": "a\nb"},
+            {"cmd": "provider.artist_albums", "provider": "library", "artist": "x" * 513},
+            {"cmd": "provider.albums", "provider": "library", "limit": MAX_ALBUMS + 1},
+            {"cmd": "provider.albums", "provider": "library", "sort": "x" * 65},
+            {"cmd": "provider.albums", "provider": "library", "sort": 3},
+            {"cmd": "provider.album_tracks", "provider": "library"},
+            {"cmd": "provider.album_tracks", "provider": "library", "album": "a", "limit": MAX_TRACKS + 1},
+            {"cmd": "provider.load_album", "provider": "library"},
+            {"cmd": "provider.load_album", "provider": "library", "album": "a", "offset": 0},
+            {"cmd": "provider.load_album", "provider": "library", "album": "a", "limit": 5},
+            {"cmd": "provider.load_album", "album": "a"},
+        )
+        for request in rejected:
+            with self.subTest(request=request), self.assertRaises(ValidationError):
+                normalize_request(request)
+
+    def test_library_browse_requests_use_the_long_provider_deadline(self):
+        for command in (
+            "provider.artists",
+            "provider.artist_albums",
+            "provider.albums",
+            "provider.album_tracks",
+            "provider.load_album",
+        ):
+            with self.subTest(command=command):
+                self.assertGreater(deadline_seconds_for_request({"cmd": command}), 12)
+
+    def test_library_browse_responses_keep_only_modeled_fields(self):
+        artists = normalize_response(
+            {"cmd": "provider.artists"},
+            {"ok": True, "total": 3, "artists": [{"id": "a1", "name": "ABBA", "album_count": 1}]},
+        )
+        self.assertEqual(artists, {"ok": True, "artists": [{"id": "a1", "name": "ABBA", "album_count": 1}], "total": 3})
+
+        albums = normalize_response(
+            {"cmd": "provider.albums"},
+            {
+                "ok": True,
+                "total": 1,
+                "albums": [{"id": "b1", "name": "Gold", "artist": "ABBA", "artist_id": "a1", "year": 1992, "track_count": 19, "genre": "Pop"}],
+                "sorts": [{"id": "newest", "label": "Recently Added"}],
+            },
+        )
+        self.assertEqual(albums["albums"][0]["year"], 1992)
+        self.assertEqual(albums["sorts"], [{"id": "newest", "label": "Recently Added"}])
+
+        by_artist = normalize_response(
+            {"cmd": "provider.artist_albums"},
+            {"ok": True, "total": 1, "albums": [{"id": "b1", "name": "Gold"}]},
+        )
+        self.assertEqual(by_artist["albums"], [{"id": "b1", "name": "Gold"}])
+        self.assertNotIn("sorts", by_artist)
+
+        for command in ("provider.album_tracks", "provider.load_album"):
+            with self.subTest(command=command):
+                tracks = normalize_response(
+                    {"cmd": command},
+                    {"ok": True, "total": 1, "tracks": [{"path": "/music/a.mp3", "title": "A", "provider_meta": {"library.id": "x"}}]},
+                )
+                self.assertEqual(tracks["tracks"][0]["provider_meta"], {"library.id": "x"})
+                self.assertEqual(tracks["total"], 1)
+
+    def test_library_browse_responses_reject_unmodeled_or_malformed_items(self):
+        for command, field, item in (
+            ("provider.artists", "artists", {"id": "a", "name": "A", "secret": 1}),
+            ("provider.artists", "artists", {"name": "A"}),
+            ("provider.artists", "artists", {"id": "a"}),
+            ("provider.albums", "albums", {"id": "a", "name": "A", "year": 10000}),
+            ("provider.albums", "albums", {"id": "a", "name": "A", "surprise": True}),
+            ("provider.artist_albums", "albums", "not an object"),
+        ):
+            with self.subTest(command=command, item=item), self.assertRaises(ValidationError):
+                normalize_response({"cmd": command}, {"ok": True, field: [item]})
+
+    def test_library_lists_are_capped_per_page(self):
+        many = [{"id": f"a{i}", "name": f"Artist {i}"} for i in range(MAX_ARTISTS + 50)]
+        result = normalize_response({"cmd": "provider.artists"}, {"ok": True, "artists": many})
+        self.assertEqual(len(result["artists"]), MAX_ARTISTS)
+        self.assertTrue(result["truncated"])
+
+    def test_library_display_text_is_sanitized_but_ids_are_opaque(self):
+        decomposed = "Cafe\u0301"
+        result = normalize_response(
+            {"cmd": "provider.artists"},
+            {"ok": True, "artists": [{"id": decomposed, "name": "Evil\u202eName\x00"}]},
+        )["artists"][0]
+        self.assertEqual(result["id"], decomposed)
+        self.assertNotIn("\u202e", result["name"])
+        self.assertNotIn("\x00", result["name"])
 
     def test_opaque_response_identifiers_are_not_unicode_normalized(self):
         decomposed = "Cafe\u0301"

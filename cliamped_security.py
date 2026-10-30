@@ -35,6 +35,9 @@ MAX_TRACKS = 256
 MAX_HISTORY_ITEMS = 64
 MAX_LYRIC_LINES = 512
 MAX_DEVICES = 64
+MAX_ARTISTS = 200
+MAX_ALBUMS = 200
+MAX_SORTS = 16
 
 DEFAULT_DEADLINE_SECONDS = 12.0
 PROVIDER_DEADLINE_SECONDS = 70.0
@@ -327,6 +330,57 @@ def _normalize_playlist(value: Any) -> dict[str, Any]:
     return result
 
 
+def _normalize_artist(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValidationError("artist must be an object")
+    _require_keys(value, {"id", "name", "album_count"}, context="artist")
+    for required in ("id", "name"):
+        if required not in value:
+            raise ValidationError(f"artist.{required} is required")
+    result = {
+        "id": _opaque_string(value["id"], field="artist.id"),
+        "name": display_text(value["name"]),
+    }
+    _optional_int(value, result, "album_count", 0, 1_000_000_000)
+    return result
+
+
+def _normalize_album(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValidationError("album must be an object")
+    _require_keys(
+        value,
+        {"id", "name", "artist", "artist_id", "year", "track_count", "genre"},
+        context="album",
+    )
+    for required in ("id", "name"):
+        if required not in value:
+            raise ValidationError(f"album.{required} is required")
+    result = {
+        "id": _opaque_string(value["id"], field="album.id"),
+        "name": display_text(value["name"]),
+    }
+    _optional_display(value, result, "artist")
+    _optional_opaque(value, result, "artist_id")
+    _optional_display(value, result, "genre")
+    _optional_int(value, result, "year", 0, 9999)
+    _optional_int(value, result, "track_count", 0, 1_000_000_000)
+    return result
+
+
+def _normalize_sort(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValidationError("sort must be an object")
+    _require_keys(value, {"id", "label"}, context="sort")
+    if "id" not in value or "label" not in value:
+        raise ValidationError("sort requires id and label")
+    return {
+        # The id goes back to CLIAMP as the sort argument of provider.albums.
+        "id": _opaque_string(value["id"], field="sort.id", maximum=64),
+        "label": display_text(value["label"], maximum=64),
+    }
+
+
 def _normalize_history(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValidationError("history item must be an object")
@@ -414,6 +468,46 @@ _NO_ARGUMENT_COMMANDS = {
     "provider.list",
     "bands",
 }
+
+
+# Browse commands of providers with an artist and album hierarchy. The field
+# that names the item is the CLIAMP parameter; offset and limit page a list.
+_BROWSE_COMMANDS = {
+    "provider.artists": (None, MAX_ARTISTS),
+    "provider.artist_albums": ("artist", MAX_ALBUMS),
+    "provider.albums": (None, MAX_ALBUMS),
+    "provider.album_tracks": ("album", MAX_TRACKS),
+    "provider.load_album": ("album", None),
+}
+
+
+def _normalize_browse_request(command: str, request: Mapping[str, Any]) -> dict[str, Any]:
+    item_field, page_maximum = _BROWSE_COMMANDS[command]
+    allowed = {"provider"}
+    if item_field:
+        allowed.add(item_field)
+    if page_maximum:
+        allowed.update({"offset", "limit"})
+    if command == "provider.albums":
+        allowed.add("sort")
+    result = _copy_command(request, allowed)
+    if "provider" not in request:
+        raise ValidationError(f"{command} requires provider")
+    result["provider"] = _opaque_string(request["provider"], field="provider", maximum=128)
+    if item_field:
+        if item_field not in request:
+            raise ValidationError(f"{command} requires {item_field}")
+        result[item_field] = _opaque_string(
+            request[item_field], field=item_field, maximum=MAX_IDENTIFIER_BYTES
+        )
+    if command == "provider.albums" and "sort" in request:
+        result["sort"] = _opaque_string(request["sort"], field="sort", maximum=64)
+    if page_maximum:
+        result["offset"] = _integer(request.get("offset", 0), field="offset", maximum=1_000_000_000)
+        result["limit"] = _integer(
+            request.get("limit", 18), field="limit", minimum=1, maximum=page_maximum
+        )
+    return result
 
 
 def normalize_request(request: Any) -> dict[str, Any]:
@@ -557,6 +651,9 @@ def normalize_request(request: Any) -> dict[str, Any]:
                 )
         return result
 
+    if command in _BROWSE_COMMANDS:
+        return _normalize_browse_request(command, request)
+
     if command == "url.load":
         result = _copy_command(request, {"path", "play"})
         if "path" not in request:
@@ -664,7 +761,21 @@ def normalize_response(
     elif command in {"provider.playlists", "provider.catalog"}:
         _add_model(response, result, "playlists", MAX_PLAYLISTS, _normalize_playlist)
         _optional_int(response, result, "total", 0, 1_000_000_000)
-    elif command in {"provider.search", "provider.load", "url.load"}:
+    elif command == "provider.artists":
+        _add_model(response, result, "artists", MAX_ARTISTS, _normalize_artist)
+        _optional_int(response, result, "total", 0, 1_000_000_000)
+    elif command in {"provider.artist_albums", "provider.albums"}:
+        _add_model(response, result, "albums", MAX_ALBUMS, _normalize_album)
+        _optional_int(response, result, "total", 0, 1_000_000_000)
+        if command == "provider.albums":
+            _add_model(response, result, "sorts", MAX_SORTS, _normalize_sort)
+    elif command in {
+        "provider.search",
+        "provider.load",
+        "provider.load_album",
+        "provider.album_tracks",
+        "url.load",
+    }:
         _add_model(response, result, "tracks", MAX_TRACKS, normalize_track)
         _optional_int(response, result, "index", -1, 1_000_000_000)
         _optional_int(response, result, "total", 0, 1_000_000_000)
