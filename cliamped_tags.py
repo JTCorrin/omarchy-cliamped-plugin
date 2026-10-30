@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import struct
 from typing import BinaryIO
 
@@ -281,8 +282,12 @@ def _parse_vorbis_comment(data: bytes) -> dict[str, object] | None:
         except struct.error:
             break
         offset += 4
-        if length > _MAX_TEXT_FRAME or offset + length > len(data):
+        if offset + length > len(data):
             break
+        if length > _MAX_TEXT_FRAME:
+            # Lyrics and embedded pictures are long; the fields after them are still wanted.
+            offset += length
+            continue
         entry = data[offset:offset + length].decode("utf-8", errors="replace")
         offset += length
         key, sep, value = entry.partition("=")
@@ -493,6 +498,24 @@ def _read_mp4(stream: BinaryIO, budget: _Budget) -> dict[str, object] | None:
 _ID3_EXTENSIONS = {".mp3", ".aac", ".aacp"}
 
 
+def _open_regular_file(path: str) -> BinaryIO:
+    """Open ``path`` for reading, refusing a symlink or anything that is not a regular file.
+
+    A scan checked the file when it walked the folder, but reads it later, and a
+    share can change meanwhile. O_NOFOLLOW stops a swapped-in symlink, and O_NONBLOCK
+    with the check of the type stops a FIFO or a device from holding the reader.
+    """
+
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("not a regular file")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def read_tags(path: str) -> dict[str, object]:
     """The tags of the audio file at ``path``. Always a dict; empty fields mean unknown."""
 
@@ -506,11 +529,13 @@ def read_tags(path: str) -> dict[str, object]:
         readers = [_read_mp4]
     elif extension in _ID3_EXTENSIONS:
         readers = [_read_id3]
-    # An MP4 moov atom, which holds the tags, can be larger than the budget of the others.
-    limit = MAX_MOOV_BYTES + 65536 if extension in {".m4a", ".m4b", ".alac", ".mp4"} else READ_BUDGET
+    # An MP4 moov atom, and the comment header of an Ogg file that carries cover art,
+    # can be larger than the budget of the others.
+    large = {".m4a", ".m4b", ".alac", ".mp4", ".ogg", ".opus"}
+    limit = MAX_MOOV_BYTES + 65536 if extension in large else READ_BUDGET
     for reader in readers:
         try:
-            with open(path, "rb") as stream:
+            with _open_regular_file(path) as stream:
                 tags = reader(stream, _Budget(limit))
         except (OSError, ValueError, struct.error, UnicodeError, OverflowError):
             continue

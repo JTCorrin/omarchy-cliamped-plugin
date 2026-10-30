@@ -1,3 +1,4 @@
+import inspect
 import json
 import os
 import sqlite3
@@ -313,6 +314,276 @@ class ScanTests(LibraryTestCase):
         (deep / "deep.mp3").write_bytes(mp3("Too Deep", "X", "Y"))
         self.scan()
         self.assertEqual(library.search_tracks(self.db, "too deep", 5)["tracks"], [])
+
+
+class ScanRobustnessTests(LibraryTestCase):
+    """Failures that a share can cause: hung or hostile files, errors that come and go, races."""
+
+    def setUp(self):
+        super().setUp()
+        self.fixture()
+        library.add_root(self.db, str(self.music))
+
+    def other_connection(self):
+        db = library.connect(str(self.home / "library.sqlite3"))
+        self.addCleanup(db.close)
+        return db
+
+    def test_a_file_that_hangs_a_reader_is_indexed_by_name_and_the_scan_ends(self):
+        import threading
+
+        release = threading.Event()
+        self.addCleanup(release.set)
+        stuck = str(self.music / "Loose" / "plain.flac")
+        original = library.read_tags
+
+        def hanging(path):
+            if path == stuck:
+                release.wait(30)
+            return original(path)
+
+        with patch.object(library, "read_tags", hanging), \
+                patch.object(library, "TAG_WAIT_MIN_SECONDS", 0.05), patch.object(library, "TAG_WAIT_SLACK_SECONDS", 0.0):
+            steps = self.scan(budget=0)
+        self.assertLess(steps, 500, "the scan must end")
+        row = self.db.execute("SELECT title, artist FROM tracks WHERE path = ?", (stuck,)).fetchone()
+        self.assertEqual(tuple(row), ("plain", ""), "indexed by its name, without tags")
+        self.assertEqual(library.scan_progress(self.db)["tracks"], 12)
+
+    def test_a_reader_that_raises_does_not_stop_the_scan(self):
+        bad = str(self.music / "Loose" / "plain.flac")
+        original = library.read_tags
+
+        def raising(path):
+            if path == bad:
+                raise RuntimeError("boom")
+            return original(path)
+
+        with patch.object(library, "read_tags", raising):
+            self.scan()
+        self.assertEqual(library.scan_progress(self.db)["tracks"], 12)
+        self.assertEqual(library.scan_progress(self.db)["pending"], 0)
+
+    def test_names_with_invisible_or_c1_characters_are_not_indexed(self):
+        for name in ("zero\u200bwidth.mp3", "c1\x85.mp3", "bidi\u202e.mp3", "mark\u200e.mp3"):
+            self.add("Hostile/" + name, mp3("Hostile " + name, "X", "Hostile Album", album_artist="X"))
+        self.add("Hostile/fine.mp3", mp3("Fine", "X", "Hostile Album", album_artist="X"))
+        self.scan()
+        album = next(a for a in library.list_albums(self.db, "", 0, 200)["albums"] if a["name"] == "Hostile Album")
+        self.assertEqual(album["track_count"], 1)
+        tracks = library.album_tracks(self.db, album["id"], 0, 50)["tracks"]
+        self.assertEqual([t["title"] for t in tracks], ["Fine"])
+
+    def test_a_row_that_fails_validation_is_left_out_of_a_page_not_fatal_to_it(self):
+        self.scan()
+        self.db.execute("UPDATE tracks SET path = path || char(133) WHERE title = 'Money'")
+        found = library.search_tracks(self.db, "floyd", 50)["tracks"]
+        titles = [t["title"] for t in found]
+        self.assertNotIn("Money", titles)
+        self.assertIn("Speak to Me", titles)
+
+    def test_a_folder_added_while_tags_are_read_is_scanned(self):
+        other = Path(self.temporary.name) / "other"
+        other.mkdir()
+        (other / "late.mp3").write_bytes(mp3("Late", "L", "L"))
+        library.start_scan(self.db)
+        for _ in range(100):  # into the tag phase
+            library.scan_step(self.db, 0)
+            if library._meta(self.db, "phase") == "tags":
+                break
+        self.assertEqual(library._meta(self.db, "phase"), "tags")
+        library.add_root(self.other_connection(), str(other))
+        self.scan(fresh=False)
+        self.assertEqual([t["title"] for t in library.search_tracks(self.db, "late", 5)["tracks"]], ["Late"])
+
+    def test_a_folder_added_by_another_process_during_a_walk_step_is_not_dropped(self):
+        other = Path(self.temporary.name) / "other"
+        other.mkdir()
+        (other / "late.mp3").write_bytes(mp3("Late", "L", "L"))
+        library.start_scan(self.db)
+        original = library._walk_directory
+        added = []
+
+        def adding(db, run, directory, root_id, root_path):
+            if not added:
+                added.append(True)
+                library.add_root(self.other_connection(), str(other))
+            return original(db, run, directory, root_id, root_path)
+
+        with patch.object(library, "_walk_directory", adding):
+            self.scan(fresh=False)
+        self.assertEqual([t["title"] for t in library.search_tracks(self.db, "late", 5)["tracks"]], ["Late"])
+
+    def test_a_listing_error_that_comes_and_goes_does_not_delete_a_track(self):
+        self.scan()
+        real_scandir = os.scandir
+        target = "Money"  # the file 02.mp3 of the Dark Side folder
+
+        class Flaky:
+            def __init__(self, entry):
+                self._entry = entry
+                self.name = entry.name
+                self.path = entry.path
+
+            def is_dir(self, **kwargs):
+                return self._entry.is_dir(**kwargs)
+
+            def is_file(self, **kwargs):
+                return self._entry.is_file(**kwargs)
+
+            def stat(self, **kwargs):
+                if self.path.endswith("Dark/02.mp3"):
+                    raise OSError("stale file handle")
+                return self._entry.stat(**kwargs)
+
+        class Listing:
+            """What os.scandir returns: an iterator that is also a context manager."""
+
+            def __init__(self, path):
+                self._entries = real_scandir(path)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._entries.close()
+
+            def __iter__(self):
+                return (Flaky(entry) for entry in self._entries)
+
+        def flaky_scandir(path):
+            return Listing(path)
+
+        with patch("os.scandir", flaky_scandir):
+            self.scan()
+        titles = {row[0] for row in self.db.execute("SELECT title FROM tracks")}
+        self.assertIn(target, titles)
+
+    def test_a_scan_that_stops_short_of_folders_keeps_their_tracks(self):
+        self.scan()
+        before = library.scan_progress(self.db)["tracks"]
+        self.add("New/n.mp3", mp3("Newcomer", "N", "N"))
+        with patch.object(library, "MAX_TRACKS_TOTAL", 0):
+            self.scan()
+        self.assertGreaterEqual(library.scan_progress(self.db)["tracks"], before)
+        titles = {row[0] for row in self.db.execute("SELECT title FROM tracks")}
+        self.assertIn("Money", titles)
+
+    def test_tracks_of_a_folder_removed_during_a_tag_read_do_not_come_back(self):
+        original = library.read_tags
+        removed = []
+
+        def removing(path):
+            if not removed:
+                removed.append(True)
+                # Another process: its own connection, made and closed in this thread.
+                other = library.connect(str(self.home / "library.sqlite3"))
+                try:
+                    library.remove_root(other, str(self.music))
+                finally:
+                    other.close()
+            return original(path)
+
+        with patch.object(library, "read_tags", removing):
+            self.scan()
+        self.assertEqual(library.scan_progress(self.db)["tracks"], 0)
+
+    def test_a_scan_cut_short_at_the_end_finishes_at_the_next_step(self):
+        library.start_scan(self.db)
+        original = library.regroup
+        failed = []
+
+        def failing_once(db):
+            # Only the grouping that ends the scan, not the interim ones.
+            if not failed and any(frame.function == "_finish_scan" for frame in inspect.stack()):
+                failed.append(True)
+                raise sqlite3.OperationalError("database is locked")
+            return original(db)
+
+        with patch.object(library, "regroup", failing_once):
+            with self.assertRaises(sqlite3.OperationalError):
+                for _ in range(100):
+                    library.scan_step(self.db, 5)
+        self.assertTrue(failed, "the end of the scan was reached")
+        self.assertNotEqual(library._meta(self.db, "phase"), "idle", "an unfinished end is not reported as finished")
+        for _ in range(10):
+            if not library.scan_step(self.db, 5)["scanning"]:
+                break
+        self.assertFalse(library.scan_progress(self.db)["scanning"])
+        self.assertGreater(library.list_artists(self.db, 0, 50)["total"], 0)
+
+    def test_an_unreadable_folder_only_protects_its_own_tracks(self):
+        self.add("Rock/sub/a.mp3", mp3("Upper A", "U", "Upper", album_artist="U"))
+        self.add("rock/sub/b.mp3", mp3("Lower B", "L", "Lower", album_artist="L"))
+        self.scan()
+        (self.music / "rock" / "sub" / "b.mp3").unlink()
+        real_scandir = os.scandir
+        target = str(self.music / "Rock")
+
+        def failing(path):
+            if str(path) == target:
+                raise PermissionError("denied")
+            return real_scandir(path)
+
+        with patch("os.scandir", failing):
+            self.scan()
+        titles = {row[0] for row in self.db.execute("SELECT title FROM tracks")}
+        self.assertIn("Upper A", titles, "the unreadable folder keeps its tracks")
+        self.assertNotIn("Lower B", titles, "a folder that differs only in case does not")
+
+    def test_a_query_does_not_wait_for_a_writer(self):
+        import threading
+
+        self.scan()
+        writer = self.other_connection()
+        writer.execute("BEGIN IMMEDIATE")
+        self.addCleanup(lambda: writer.in_transaction and writer.execute("ROLLBACK"))
+        result = []
+
+        def query():
+            db = library.connect(str(self.home / "library.sqlite3"))
+            result.append(library.list_artists(db, 0, 5)["total"])
+            db.close()
+
+        thread = threading.Thread(target=query)
+        started = time.monotonic()
+        thread.start()
+        thread.join(5)
+        self.assertFalse(thread.is_alive(), "a browse waited for the write lock")
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(result, [library.list_artists(self.db, 0, 5)["total"]])
+
+    def test_a_failed_batch_leaves_the_connection_usable(self):
+        library.start_scan(self.db)
+        with patch.object(library, "_tag_row", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                for _ in range(100):
+                    library.scan_step(self.db, 5)
+        self.assertFalse(self.db.in_transaction)
+        self.db.execute("SELECT 1 FROM tracks LIMIT 1")
+
+    def test_relative_folders_are_refused(self):
+        other = Path(self.temporary.name) / "rel"
+        other.mkdir()
+        previous = os.getcwd()
+        os.chdir(self.temporary.name)
+        self.addCleanup(os.chdir, previous)
+        with self.assertRaisesRegex(library.LibraryError, "absolute"):
+            library.add_root(self.db, "rel")
+
+    def test_the_folder_limit_holds_across_connections(self):
+        folders = []
+        for index in range(library.MAX_ROOTS):
+            folder = Path(self.temporary.name) / f"f{index}"
+            folder.mkdir()
+            folders.append(folder)
+        # The root of setUp is the first; all but one slot are filled. Another connection fills the last.
+        for folder in folders[: library.MAX_ROOTS - 2]:
+            library.add_root(self.db, str(folder))
+        db_a, db_b = self.other_connection(), self.other_connection()
+        library.add_root(db_a, str(folders[library.MAX_ROOTS - 2]))
+        with self.assertRaisesRegex(library.LibraryError, "at most"):
+            library.add_root(db_b, str(Path(self.temporary.name)))
 
 
 class BrowseTests(LibraryTestCase):

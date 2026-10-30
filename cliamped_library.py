@@ -20,6 +20,7 @@ this module passes ``normalize_track``.
 from __future__ import annotations
 
 import ctypes
+import contextlib
 import hashlib
 import json
 import os
@@ -63,7 +64,7 @@ finally:
     if _inserted_bundle_directory:
         sys.path.remove(_BUNDLE_DIRECTORY)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 AUDIO_EXTENSIONS = frozenset(
     {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".aacp", ".m4b", ".alac", ".wma", ".opus", ".webm"}
 )
@@ -81,6 +82,10 @@ SCAN_BUDGET_DEFAULT = 8
 SCAN_BUDGET_MAX = 20
 TAG_WORKERS = 4
 TAG_BATCH = 64
+# A file whose tags could not be read in time is tried this many times, then indexed by its name.
+TAG_TRIES = 3
+TAG_WAIT_MIN_SECONDS = 1.0
+TAG_WAIT_SLACK_SECONDS = 5.0
 REGROUP_INTERVAL_SECONDS = 15.0
 QUEUE_FILE_MAX_AGE_SECONDS = 2 * 3600
 
@@ -175,7 +180,7 @@ CREATE INDEX IF NOT EXISTS albums_artist ON albums(artist_id, year, sort);
 CREATE INDEX IF NOT EXISTS albums_sort ON albums(sort, artist_sort);
 CREATE INDEX IF NOT EXISTS albums_added ON albums(added);
 CREATE TABLE IF NOT EXISTS walk(dir TEXT PRIMARY KEY, root_id INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS todo(path TEXT PRIMARY KEY, dir TEXT NOT NULL, root_id INTEGER NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS todo(path TEXT PRIMARY KEY, dir TEXT NOT NULL, root_id INTEGER NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
@@ -196,20 +201,20 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     db.execute("PRAGMA synchronous = NORMAL")
     db.execute("PRAGMA temp_store = MEMORY")
     version = db.execute("PRAGMA user_version").fetchone()[0]
-    db.execute("BEGIN IMMEDIATE")
-    try:
-        if version != SCHEMA_VERSION:
-            # Only the folders are the user's. The index is rebuilt by the next scan.
-            for table in (*_DERIVED_TABLES, "meta"):
-                db.execute(f"DROP TABLE IF EXISTS {table}")
-        for statement in _SCHEMA.split(";"):
-            if statement.strip():
-                db.execute(statement)
-        db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        db.execute("COMMIT")
-    except BaseException:
-        db.execute("ROLLBACK")
-        raise
+    ready = version == SCHEMA_VERSION and db.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('roots', 'tracks', 'meta', 'todo', 'walk', 'albums', 'artists')"
+    ).fetchone()[0] == 7
+    if not ready:
+        # Only the first call, or a change of schema, takes the write lock; a query never does.
+        with transaction(db, "IMMEDIATE"):
+            if version != SCHEMA_VERSION:
+                # Only the folders are the user's. The index is rebuilt by the next scan.
+                for table in (*_DERIVED_TABLES, "meta"):
+                    db.execute(f"DROP TABLE IF EXISTS {table}")
+            for statement in _SCHEMA.split(";"):
+                if statement.strip():
+                    db.execute(statement)
+            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     return db
 
 
@@ -220,6 +225,19 @@ def _meta(db: sqlite3.Connection, key: str, default: str = "") -> str:
 
 def _set_meta(db: sqlite3.Connection, key: str, value: object) -> None:
     db.execute("INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, str(value)))
+
+
+@contextlib.contextmanager
+def transaction(db: sqlite3.Connection, mode: str = ""):
+    """BEGIN ... COMMIT, with a ROLLBACK when the block raises, so the connection stays usable."""
+
+    db.execute(f"BEGIN {mode}".strip())
+    try:
+        yield
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+    db.execute("COMMIT")
 
 
 # Folders ----------------------------------------------------------------------
@@ -244,47 +262,41 @@ def list_roots(db: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def add_root(db: sqlite3.Connection, path: str) -> None:
+    if not (path == "~" or path.startswith("~/") or os.path.isabs(path)):
+        # The helper's working directory is not the user's.
+        raise LibraryError("the folder must be an absolute path")
     root = _expand_root(path)
     if not os.path.isdir(root):
         raise LibraryError(f"{root} is not a folder")
     real = os.path.realpath(root)
-    existing = [row[0] for row in db.execute("SELECT path FROM roots")]
-    if len(existing) >= MAX_ROOTS:
-        raise LibraryError(f"at most {MAX_ROOTS} folders can be added")
-    for have in existing:
-        real_have = os.path.realpath(have)
-        if root == have or real == real_have:
-            raise LibraryError(f"{root} is already in the library")
-        if _within(have, root) or _within(real_have, real):
-            raise LibraryError(f"{root} is inside {have}, which is already in the library")
-        if _within(root, have) or _within(real, real_have):
-            raise LibraryError(f"{root} holds {have}, which is already in the library; remove that folder first")
-    db.execute("BEGIN IMMEDIATE")
-    try:
+    with transaction(db, "IMMEDIATE"):
+        existing = [row[0] for row in db.execute("SELECT path FROM roots")]
+        if len(existing) >= MAX_ROOTS:
+            raise LibraryError(f"at most {MAX_ROOTS} folders can be added")
+        for have in existing:
+            real_have = os.path.realpath(have)
+            if root == have or real == real_have:
+                raise LibraryError(f"{root} is already in the library")
+            if _within(have, root) or _within(real_have, real):
+                raise LibraryError(f"{root} is inside {have}, which is already in the library")
+            if _within(root, have) or _within(real, real_have):
+                raise LibraryError(f"{root} holds {have}, which is already in the library; remove that folder first")
         cursor = db.execute("INSERT INTO roots(path, added, available) VALUES(?, ?, 1)", (root, int(time.time())))
         if _meta(db, "phase", "idle") != "idle":
-            # A scan is under way: it picks the new folder up too.
+            # A scan is under way: walk the new folder too, even if it is reading tags now.
             db.execute("INSERT OR IGNORE INTO walk(dir, root_id) VALUES(?, ?)", (root, cursor.lastrowid))
-        db.execute("COMMIT")
-    except BaseException:
-        db.execute("ROLLBACK")
-        raise
+            _set_meta(db, "phase", "walk")
 
 
 def remove_root(db: sqlite3.Connection, path: str) -> None:
     root = _expand_root(path)
-    db.execute("BEGIN IMMEDIATE")
-    try:
+    with transaction(db, "IMMEDIATE"):
         row = db.execute("SELECT id FROM roots WHERE path = ?", (root,)).fetchone()
         if row is None:
             raise LibraryError(f"{root} is not in the library")
         for table in ("tracks", "walk", "todo"):
             db.execute(f"DELETE FROM {table} WHERE root_id = ?", (row[0],))
         db.execute("DELETE FROM roots WHERE id = ?", (row[0],))
-        db.execute("COMMIT")
-    except BaseException:
-        db.execute("ROLLBACK")
-        raise
     regroup(db)
 
 
@@ -306,7 +318,9 @@ def _readable_name(name: str) -> bool:
         name.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return not any(ord(character) < 0x20 or ord(character) == 0x7F for character in name)
+    # The categories that every path must avoid to pass the plugin's validation
+    # later: controls (including C1), invisible formatting marks and surrogates.
+    return not any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in name)
 
 
 def _is_audio(name: str) -> bool:
@@ -327,10 +341,8 @@ def scan_progress(db: sqlite3.Connection) -> dict[str, Any]:
 def start_scan(db: sqlite3.Connection) -> bool:
     """Begin a scan unless one is under way. Returns True when one begins."""
 
-    db.execute("BEGIN IMMEDIATE")
-    try:
+    with transaction(db, "IMMEDIATE"):
         if _meta(db, "phase", "idle") != "idle":
-            db.execute("COMMIT")
             return False
         run = int(_meta(db, "run", "0")) + 1
         _set_meta(db, "run", run)
@@ -350,10 +362,7 @@ def start_scan(db: sqlite3.Connection) -> bool:
         _set_meta(db, "phase", "walk")
         _set_meta(db, "started", int(time.time()))
         _set_meta(db, "regrouped", 0)
-        db.execute("COMMIT")
-    except BaseException:
-        db.execute("ROLLBACK")
-        raise
+        _set_meta(db, "capped", 0)
     return True
 
 
@@ -375,11 +384,12 @@ def _walk_directory(db: sqlite3.Connection, run: int, directory: str, root_id: i
     try:
         entries = list(os.scandir(directory))
     except OSError:
-        # The folder could not be read: what the index knows below it stays.
-        escaped = directory.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        # The folder could not be read: what the index knows below it stays. The
+        # prefix is compared exactly: LIKE would ignore the case of ASCII letters.
+        prefix = directory.rstrip(os.sep) + os.sep
         db.execute(
-            "UPDATE tracks SET seen = ? WHERE dir = ? OR dir LIKE ? ESCAPE '\\'",
-            (run, directory, escaped.rstrip(os.sep) + os.sep + "%"),
+            "UPDATE tracks SET seen = ? WHERE dir = ? OR substr(dir, 1, ?) = ?",
+            (run, directory, len(prefix), prefix),
         )
         db.execute("DELETE FROM walk WHERE dir = ?", (directory,))
         return 0
@@ -387,6 +397,7 @@ def _walk_directory(db: sqlite3.Connection, run: int, directory: str, root_id: i
         name = entry.name
         if not _readable_name(name):
             continue
+        path = entry.path
         try:
             if entry.is_dir(follow_symlinks=False):
                 if depth < MAX_DEPTH:
@@ -396,8 +407,10 @@ def _walk_directory(db: sqlite3.Connection, run: int, directory: str, root_id: i
                 continue
             info = entry.stat(follow_symlinks=False)
         except OSError:
+            # A share that fails for a moment must not make a known track look deleted.
+            if path in known:
+                unchanged.append((run, path))
             continue
-        path = entry.path
         if len(path.encode("utf-8")) > MAX_PATH_BYTES:
             continue
         found += 1
@@ -406,13 +419,12 @@ def _walk_directory(db: sqlite3.Connection, run: int, directory: str, root_id: i
             unchanged.append((run, path))
         else:
             changed.append((path, directory, root_id, mtime, size))
-    db.execute("BEGIN")
-    db.executemany("UPDATE tracks SET seen = ? WHERE path = ?", unchanged)
-    db.executemany("INSERT OR REPLACE INTO todo(path, dir, root_id, mtime, size) VALUES(?, ?, ?, ?, ?)", changed)
-    db.executemany("INSERT OR IGNORE INTO walk(dir, root_id) VALUES(?, ?)", subdirectories)
-    db.execute("UPDATE roots SET found = found + ? WHERE id = ?", (found, root_id))
-    db.execute("DELETE FROM walk WHERE dir = ?", (directory,))
-    db.execute("COMMIT")
+    with transaction(db):
+        db.executemany("UPDATE tracks SET seen = ? WHERE path = ?", unchanged)
+        db.executemany("INSERT OR REPLACE INTO todo(path, dir, root_id, mtime, size) VALUES(?, ?, ?, ?, ?)", changed)
+        db.executemany("INSERT OR IGNORE INTO walk(dir, root_id) VALUES(?, ?)", subdirectories)
+        db.execute("UPDATE roots SET found = found + ? WHERE id = ?", (found, root_id))
+        db.execute("DELETE FROM walk WHERE dir = ?", (directory,))
     return len(changed)
 
 
@@ -447,22 +459,39 @@ ON CONFLICT(path) DO UPDATE SET dir=excluded.dir, root_id=excluded.root_id, mtim
 
 
 def _read_tags_batch(db: sqlite3.Connection, run: int, deadline: float) -> int:
-    rows = db.execute("SELECT path, dir, root_id, mtime, size FROM todo LIMIT ?", (TAG_BATCH,)).fetchall()
+    rows = db.execute(
+        "SELECT path, dir, root_id, mtime, size, tries FROM todo ORDER BY tries, path LIMIT ?", (TAG_BATCH,)
+    ).fetchall()
     if not rows:
         return 0
-    pool = ThreadPoolExecutor(max_workers=TAG_WORKERS)
-    try:
-        futures = [pool.submit(_read_one, tuple(row)) for row in rows]
-        # A file on a stalled share can hold a worker; it is left in the queue for the next step.
-        done, _ = wait(futures, timeout=max(1.0, deadline - time.monotonic() + 5.0))
-        results = [future.result() for future in done if future.exception() is None]
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
-    db.execute("BEGIN")
-    db.executemany(_UPSERT, [_tag_row(item, tags, run) for item, tags in results])
-    db.executemany("DELETE FROM todo WHERE path = ?", [(item[0],) for item, _ in results])
-    db.execute("COMMIT")
-    return len(results)
+    # A file that has held a reader too many times is indexed by its name: it must not
+    # keep the scan from ever ending.
+    give_up = [row for row in rows if row[5] >= TAG_TRIES]
+    reading = [row for row in rows if row[5] < TAG_TRIES]
+    results: list[tuple[tuple[str, str, int, int, int], dict[str, object]]] = [
+        (tuple(row[:5]), {}) for row in give_up
+    ]
+    stuck: list[str] = []
+    if reading:
+        pool = ThreadPoolExecutor(max_workers=TAG_WORKERS)
+        try:
+            futures = {pool.submit(_read_one, tuple(row[:5])): row[0] for row in reading}
+            # A file on a stalled share can hold a worker: it is left in the queue and counted.
+            done, pending = wait(futures, timeout=max(TAG_WAIT_MIN_SECONDS, deadline - time.monotonic() + TAG_WAIT_SLACK_SECONDS))
+            results += [future.result() for future in done if future.exception() is None]
+            stuck = [futures[future] for future in pending]
+            # A reader that failed with an error (not a hang) is indexed by its name too.
+            results += [(tuple(next(r[:5] for r in reading if r[0] == futures[future])), {})
+                        for future in done if future.exception() is not None]
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+    live = {row[0] for row in db.execute("SELECT id FROM roots")}
+    with transaction(db):
+        # A folder removed while its tags were read must not bring its tracks back.
+        db.executemany(_UPSERT, [_tag_row(item, tags, run) for item, tags in results if item[2] in live])
+        db.executemany("DELETE FROM todo WHERE path = ?", [(item[0],) for item, _ in results])
+        db.executemany("UPDATE todo SET tries = tries + 1 WHERE path = ?", [(path,) for path in stuck])
+    return len(results) + len(stuck)
 
 
 def regroup(db: sqlite3.Connection) -> None:
@@ -532,8 +561,7 @@ def regroup(db: sqlite3.Connection) -> None:
         link = own if own in artist_rows else artist_id
         if (album_id, link) != (old_album, old_link):
             updates.append((album_id, link, path))
-    db.execute("BEGIN IMMEDIATE")
-    try:
+    with transaction(db, "IMMEDIATE"):
         db.executemany("UPDATE tracks SET album_id = ?, link_artist_id = ? WHERE path = ?", updates)
         db.execute("DELETE FROM artists")
         db.execute("DELETE FROM albums")
@@ -542,48 +570,42 @@ def regroup(db: sqlite3.Connection) -> None:
             "INSERT INTO albums(id, name, sort, artist, artist_id, artist_sort, year, tracks, added) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             album_rows,
         )
-        db.execute("COMMIT")
-    except BaseException:
-        db.execute("ROLLBACK")
-        raise
 
 
 def _finish_scan(db: sqlite3.Connection, run: int) -> None:
     """End a scan: drop what is gone, keep what could not be checked, and group."""
 
-    db.execute("BEGIN IMMEDIATE")
-    try:
+    with transaction(db, "IMMEDIATE"):
+        capped = _meta(db, "capped", "0") == "1"
         for root_id, available, found in list(db.execute("SELECT id, available, found FROM roots")):
             has_tracks = db.execute("SELECT 1 FROM tracks WHERE root_id = ? LIMIT 1", (root_id,)).fetchone() is not None
-            if not available or (found == 0 and has_tracks):
-                # An unmounted share looks like an empty folder: keep the saved index for it.
-                db.execute("UPDATE roots SET available = 0 WHERE id = ?", (root_id,))
+            # An unmounted share looks like an empty folder: keep the saved index for it.
+            unreadable = not available or (found == 0 and has_tracks)
+            if capped or unreadable:
+                # A scan that stopped short of some folders keeps their tracks too.
                 db.execute("UPDATE tracks SET seen = ? WHERE root_id = ?", (run, root_id))
-            else:
-                db.execute("UPDATE roots SET available = 1 WHERE id = ?", (root_id,))
+            db.execute("UPDATE roots SET available = ? WHERE id = ?", (0 if unreadable else 1, root_id))
         db.execute("DELETE FROM tracks WHERE seen != ?", (run,))
+    # Group before the scan is marked ended: if this is cut short, the next step runs it again.
+    regroup(db)
+    with transaction(db, "IMMEDIATE"):
         _set_meta(db, "phase", "idle")
         _set_meta(db, "finished", int(time.time()))
-        db.execute("COMMIT")
-    except BaseException:
-        db.execute("ROLLBACK")
-        raise
-    regroup(db)
 
 
 def scan_step(db: sqlite3.Connection, budget_seconds: float) -> dict[str, Any]:
     """Run scan work for at most ``budget_seconds``. The scan resumes at the next call."""
 
     deadline = time.monotonic() + budget_seconds
-    db.execute("BEGIN IMMEDIATE")
-    until = float(_meta(db, "step_until", "0"))
-    if until > time.time():
-        db.execute("COMMIT")
+    with transaction(db, "IMMEDIATE"):
+        until = float(_meta(db, "step_until", "0"))
+        busy = until > time.time()
+        if not busy:
+            _set_meta(db, "step_until", time.time() + budget_seconds + 30)
+        phase = _meta(db, "phase", "idle")
+        run = int(_meta(db, "run", "0"))
+    if busy:
         return {**scan_progress(db), "busy": True}
-    _set_meta(db, "step_until", time.time() + budget_seconds + 30)
-    phase = _meta(db, "phase", "idle")
-    run = int(_meta(db, "run", "0"))
-    db.execute("COMMIT")
     try:
         if phase == "walk":
             roots = {row[0]: row[1] for row in db.execute("SELECT id, path FROM roots")}
@@ -598,10 +620,15 @@ def scan_step(db: sqlite3.Connection, budget_seconds: float) -> dict[str, Any]:
                     phase = "tags"
                     break
                 if row[1] not in roots:
-                    db.execute("DELETE FROM walk WHERE dir = ?", (row[0],))
-                    continue
+                    # A folder may have been added since this step began.
+                    roots = {r[0]: r[1] for r in db.execute("SELECT id, path FROM roots")}
+                    if row[1] not in roots:
+                        db.execute("DELETE FROM walk WHERE dir = ?", (row[0],))
+                        continue
                 if queued > MAX_TRACKS_TOTAL:
-                    # More files than the library takes: stop reading folders.
+                    # More files than the library takes: stop reading folders, and keep
+                    # the tracks of the folders that were not reached.
+                    _set_meta(db, "capped", 1)
                     db.execute("DELETE FROM walk")
                     continue
                 queued += _walk_directory(db, run, row[0], row[1], roots[row[1]])
@@ -628,6 +655,18 @@ def scan_step(db: sqlite3.Connection, budget_seconds: float) -> dict[str, Any]:
 
 
 # Queries ----------------------------------------------------------------------
+
+
+def _tracks(rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+    """The tracks of ``rows``. A row that fails validation is left out; it must not spoil a page."""
+
+    tracks = []
+    for row in rows:
+        try:
+            tracks.append(_track(row))
+        except ValidationError:
+            continue
+    return tracks
 
 
 def _track(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
@@ -711,7 +750,7 @@ def album_tracks(db: sqlite3.Connection, album_id: str, offset: int, limit: int)
     total = db.execute("SELECT COUNT(*) FROM tracks WHERE album_id = ?", (album_id,)).fetchone()[0]
     if total == 0:
         raise LibraryError("that album is no longer in the library")
-    return {"tracks": [_track(row) for row in rows], "total": total}
+    return {"tracks": _tracks(rows), "total": total}
 
 
 _FIELD_BONUS = (10, 6, 0)  # title, artist, album
@@ -763,7 +802,7 @@ def search_tracks(db: sqlite3.Connection, query: str, limit: int) -> dict[str, A
     if not scored:
         scored = _fuzzy(db, "".join(words))
     scored.sort(key=lambda item: item[:6])
-    return {"tracks": [_track(item[6]) for item in scored[:limit]], "total": min(len(scored), 1_000_000)}
+    return {"tracks": _tracks([item[6] for item in scored[:limit]]), "total": min(len(scored), 1_000_000)}
 
 
 def _fuzzy(db: sqlite3.Connection, letters: str) -> list[tuple[int, str, str, int, int, str, tuple[Any, ...]]]:

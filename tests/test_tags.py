@@ -3,6 +3,7 @@ import shutil
 import struct
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -265,6 +266,46 @@ class RobustnessTests(TagFixtureTests):
 
     def test_a_missing_file_gives_empty_tags(self):
         self.assertEqual(read_tags(os.path.join(self.directory.name, "none.mp3"))["title"], "")
+
+
+class SafeOpenTests(TagFixtureTests):
+    def test_symlinks_fifos_and_directories_are_not_read(self):
+        real = self.write("real.mp3", id3_tag([id3_frame(b"TIT2", "Real")]))
+        link = os.path.join(self.directory.name, "link.mp3")
+        os.symlink(real, link)
+        fifo = os.path.join(self.directory.name, "fifo.mp3")
+        os.mkfifo(fifo)
+        folder = os.path.join(self.directory.name, "dir.mp3")
+        os.mkdir(folder)
+        self.assertEqual(read_tags(real)["title"], "Real")
+        for path in (link, fifo, folder):
+            with self.subTest(path=os.path.basename(path)):
+                started = time.monotonic()
+                self.assertEqual(read_tags(path)["title"], "")
+                self.assertLess(time.monotonic() - started, 1.0, "a FIFO must not hold the reader")
+
+
+class LongFieldTests(TagFixtureTests):
+    def test_a_long_comment_is_skipped_and_the_fields_after_it_are_kept(self):
+        comments = [b"TITLE=Before", b"LYRICS=" + b"la " * 3000, b"ARTIST=After"]
+        tags = read_tags(self.write("long.flac", flac_file(comments)))
+        self.assertEqual((tags["title"], tags["artist"]), ("Before", "After"))
+
+    def test_an_ogg_file_with_big_cover_art_still_gives_its_tags(self):
+        art = b"METADATA_BLOCK_PICTURE=" + b"A" * 3_000_000
+        comment = b"\x03vorbis" + vorbis_comment_body([b"TITLE=Covered", art, b"ARTIST=Band"]) + b"\x01"
+        data = ogg_page(b"\x01vorbis" + b"\x00" * 23, flags=2)
+        # One packet over many pages: 255 laced segments of 255 bytes fill a page.
+        offset, sequence = 0, 1
+        while offset < len(comment):
+            chunk = comment[offset:offset + 255 * 255]
+            offset += len(chunk)
+            segments = [255] * (len(chunk) // 255) + [len(chunk) % 255] if offset >= len(comment) else [255] * 255
+            header = b"OggS\x00" + bytes([1 if sequence > 1 else 0]) + struct.pack("<qIII", 0, 1, sequence, 0) + bytes([len(segments)])
+            data += header + bytes(segments) + chunk
+            sequence += 1
+        tags = read_tags(self.write("art.ogg", data))
+        self.assertEqual((tags["title"], tags["artist"]), ("Covered", "Band"))
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is needed to make real files")
