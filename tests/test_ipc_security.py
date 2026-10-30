@@ -399,6 +399,24 @@ class SchemaBoundaryTests(unittest.TestCase):
             with self.subTest(request=request), self.assertRaises(ValidationError):
                 normalize_request(request)
 
+    def test_favorite_toggle_request_has_an_exact_schema(self):
+        track = {"path": "/music/a.mp3", "title": "A", "provider_meta": {"library.id": "x"}}
+        self.assertEqual(
+            normalize_request({"cmd": "playlist.bookmark", "provider": "library", "track": track}),
+            {"cmd": "playlist.bookmark", "provider": "library", "track": track},
+        )
+        for request in (
+            {"cmd": "playlist.bookmark", "provider": "library"},
+            {"cmd": "playlist.bookmark", "track": track},
+            {"cmd": "playlist.bookmark", "provider": "library", "track": {"title": "no path"}},
+            {"cmd": "playlist.bookmark", "provider": "library", "track": "not an object"},
+            {"cmd": "playlist.bookmark", "provider": "library", "track": {**track, "extra": 1}},
+            {"cmd": "playlist.bookmark", "provider": "library", "track": track, "playlist": "x"},
+            {"cmd": "playlist.bookmark", "provider": "", "track": track},
+        ):
+            with self.subTest(request=request), self.assertRaises(ValidationError):
+                normalize_request(request)
+
     def test_library_browse_requests_use_the_long_provider_deadline(self):
         for command in (
             "provider.artists",

@@ -51,6 +51,8 @@ The Library tab searches and browses the music that CLIAMP's Library provider ha
 - **Artists** lists artists, then their albums, then the tracks of an album.
 - **Albums** lists every album. The sort button cycles the orders that CLIAMP offers, such as Recently Added.
 - The search box finds tracks by title, artist or album. Words may come in any order and accents do not count. Selecting a result plays it.
+- The star at the end of a track row toggles CLIAMP's ♥ favorite for that track, in album lists and in search results. Favorites appear under **Browse → Library → Favorites**, and in CLIAMP's own Favorites list. The Favorites tab of CLIAMPed is for Radio Browser stations only.
+- **Browse → Library** also shows your saved collections, and a button that opens the Library tab.
 - **Play Album** loads the open album into the Queue and plays it. Selecting a track in an album loads the album and starts at that track.
 
 Lists load 60 items at a time with **Load More**, and the panel keeps at most 600 items of a list. An album shows at most 200 tracks, and a search shows at most 50 results.

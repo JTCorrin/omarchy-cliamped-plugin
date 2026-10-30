@@ -1087,9 +1087,40 @@ Panel {
               }
             }
 
+            Rectangle {
+              visible: root.hostWidget && root.hostWidget.selectedProviderKey === root.hostWidget.libraryProviderKey
+              width: parent.width
+              height: Style.space(48)
+              radius: Style.cornerRadius
+              color: libraryLinkMouse.containsMouse ? root.tint(root.adobe, 0.28) : root.tint(root.adobe, 0.15)
+              border.width: 1
+              border.color: root.adobe
+              SafeText {
+                anchors.centerIn: parent
+                text: "BROWSE ARTISTS AND ALBUMS  ›"
+                color: root.sand
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.1
+              }
+              MouseArea {
+                id: libraryLinkMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.libraryTab = "library"
+                  browserFlick.contentY = 0
+                  if (root.hostWidget) root.hostWidget.showLibrary(true)
+                }
+              }
+            }
+
             SafeText {
               visible: root.hostWidget && root.hostWidget.providerCollections.length > 0
-              text: root.hostWidget && root.hostWidget.selectedProviderKey === "local"
+              text: root.hostWidget && (root.hostWidget.selectedProviderKey === "local"
+                  || root.hostWidget.selectedProviderKey === root.hostWidget.libraryProviderKey)
                 ? "LOCAL COLLECTIONS" : "DIRECTORY STATIONS"
               color: root.adobe
               font.family: root.panelFont
@@ -1287,10 +1318,12 @@ Panel {
                 model: root.hostWidget ? root.hostWidget.providerResults : []
                 Rectangle {
                   required property var modelData
-                  readonly property bool favoritable: root.hostWidget
-                    && root.hostWidget.selectedProviderKey === "radio"
+                  readonly property bool libraryTrack: root.hostWidget
+                    && root.hostWidget.selectedProviderKey === root.hostWidget.libraryProviderKey
+                  readonly property bool favoritable: libraryTrack || (root.hostWidget
+                    && root.hostWidget.selectedProviderKey === "radio")
                   readonly property bool starred: favoritable
-                    && root.hostWidget.isSearchFavorite(modelData)
+                    && (libraryTrack ? modelData.bookmark === true : root.hostWidget.isSearchFavorite(modelData))
                   width: browserColumn.width
                   height: Style.space(38)
                   radius: Style.cornerRadius
@@ -1351,9 +1384,13 @@ Panel {
                     anchors.bottom: parent.bottom
                     width: Style.space(42)
                     visible: favoritable
-                    enabled: visible && root.hostWidget && !root.hostWidget.searchFavoritesBusy
+                    enabled: visible && root.hostWidget && (libraryTrack || !root.hostWidget.searchFavoritesBusy)
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: if (root.hostWidget) root.hostWidget.toggleSearchFavorite(modelData)
+                    onClicked: {
+                      if (!root.hostWidget) return
+                      if (libraryTrack) root.hostWidget.toggleTrackFavorite(modelData)
+                      else root.hostWidget.toggleSearchFavorite(modelData)
+                    }
                   }
                 }
               }
@@ -1851,10 +1888,22 @@ Panel {
                     maximumLineCount: 1
                   }
                   SafeText {
+                    id: libraryRowStar
+                    width: Style.space(34)
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(5)
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: libraryRow.modelData.bookmark ? "★" : "☆"
+                    color: libraryRow.modelData.bookmark ? root.adobe : root.turquoise
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.body
+                    horizontalAlignment: Text.AlignHCenter
+                  }
+                  SafeText {
                     id: libraryRowDetail
                     width: parent.width * 0.3
-                    anchors.right: parent.right
-                    anchors.rightMargin: Style.space(10)
+                    anchors.right: libraryRowStar.left
+                    anchors.rightMargin: Style.space(6)
                     anchors.verticalCenter: parent.verticalCenter
                     text: libraryBody.view === "search"
                       ? [libraryRow.modelData.artist, libraryRow.modelData.album]
@@ -1870,8 +1919,17 @@ Panel {
                     maximumLineCount: 1
                   }
                   MouseArea {
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: Style.space(42)
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget) root.hostWidget.toggleTrackFavorite(libraryRow.modelData)
+                  }
+                  MouseArea {
                     id: libraryRowMouse
                     anchors.fill: parent
+                    anchors.rightMargin: Style.space(42)
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {

@@ -654,6 +654,17 @@ def normalize_request(request: Any) -> dict[str, Any]:
     if command in _BROWSE_COMMANDS:
         return _normalize_browse_request(command, request)
 
+    if command == "playlist.bookmark":
+        # Toggles the favorite heart of one track. CLIAMP keeps the legacy
+        # name; it needs a known provider and the track, not a playlist.
+        result = _copy_command(request, {"provider", "track"})
+        for required in ("provider", "track"):
+            if required not in request:
+                raise ValidationError(f"playlist.bookmark requires {required}")
+        result["provider"] = _opaque_string(request["provider"], field="provider", maximum=128)
+        result["track"] = _request_track(request["track"])
+        return result
+
     if command == "url.load":
         result = _copy_command(request, {"path", "play"})
         if "path" not in request:

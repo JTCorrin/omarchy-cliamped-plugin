@@ -43,6 +43,7 @@ Mutating operations used by CLIAMPed:
 {"cmd":"provider.load","provider":"radio","playlist":"<id>"}
 {"cmd":"provider.favorite","provider":"radio","playlist":"<id>"}
 {"cmd":"provider.load_album","provider":"library","album":"<album id>"}
+{"cmd":"playlist.bookmark","provider":"library","track":{"path":"/absolute/path/to/audio.flac"}}
 ```
 
 The IPC `volume` value is an absolute dB target, unlike the relative delta accepted by `cliamp volume`. Keep absolute targets within `-30` to `+6` dB.

@@ -576,7 +576,7 @@ BarWidget {
 
   function isLibraryKind(kind) {
     return kind === "libArtists" || kind === "libAlbums" || kind === "libTracks"
-      || kind === "libSearch" || kind === "libLoad"
+      || kind === "libSearch" || kind === "libLoad" || kind === "libFavorite"
   }
 
   function isProviderKind(kind) {
@@ -880,6 +880,32 @@ BarWidget {
     runLibraryRequest("libSearch", {
       cmd: "provider.search", provider: libraryProviderKey, query: value, limit: 50
     })
+  }
+
+  // Toggles the favorite heart of a track. CLIAMP keeps the hearts of every
+  // provider in one list, shown as Favorites under Browse.
+  function toggleTrackFavorite(track) {
+    var safeTrack = normalizeTrack(track)
+    if (!safeTrack) return
+    runLibraryRequest("libFavorite", {
+      cmd: "playlist.bookmark", provider: libraryProviderKey, track: safeTrack
+    })
+  }
+
+  // Returns the tracks with the heart of the track at path flipped.
+  function flipFavorite(tracks, path) {
+    var result = []
+    for (var i = 0; i < tracks.length; ++i) {
+      var track = tracks[i]
+      if (track.path === path) {
+        var copy = Object.assign({}, track)
+        copy.bookmark = !track.bookmark
+        result.push(copy)
+      } else {
+        result.push(track)
+      }
+    }
+    return result
   }
 
   function cycleLibrarySort() {
@@ -1462,6 +1488,16 @@ BarWidget {
           root.libraryTracks = root.normalizeTracks(response.tracks, 50)
           root.libraryLoaded = true
         }
+      } else if (kind === "libFavorite") {
+        var heartPath = current && current.request && current.request.track
+          ? current.request.track.path : ""
+        if (heartPath) {
+          root.libraryTracks = root.flipFavorite(root.libraryTracks, heartPath)
+          root.providerResults = root.flipFavorite(root.providerResults, heartPath)
+        }
+        // Browse lists the hearts as a collection, so its count is now stale.
+        if (root.selectedProviderKey === root.libraryProviderKey)
+          root.runProviderRequest("playlists", { cmd: "provider.playlists", provider: root.libraryProviderKey })
       } else if (kind === "libLoad") {
         root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
         root.currentIndex = root.queueTracks.length ? 0 : -1
