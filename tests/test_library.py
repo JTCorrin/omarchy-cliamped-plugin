@@ -473,7 +473,8 @@ class QueueFileTests(LibraryTestCase):
         self.assertEqual(os.stat(os.path.dirname(result["path"])).st_mode & 0o777, 0o700)
         lines = Path(result["path"]).read_text(encoding="utf-8").splitlines()
         self.assertEqual(lines[0], "#EXTM3U")
-        self.assertEqual(lines[1], "#EXTINF:-1,Pink Floyd - In the Flesh")
+        # No #EXTINF lines: CLIAMP then reads the tags of each file itself.
+        self.assertFalse([line for line in lines if line.startswith("#EXTINF")])
         paths = [line for line in lines if not line.startswith("#")]
         self.assertEqual([os.path.relpath(p, self.music) for p in paths],
                          ["Pink Floyd/Wall/01.mp3", "Pink Floyd/Wall/02.mp3", "Pink Floyd/Wall/d2.mp3"])

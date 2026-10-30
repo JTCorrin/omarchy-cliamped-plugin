@@ -1118,40 +1118,9 @@ Panel {
               }
             }
 
-            Rectangle {
-              visible: root.hostWidget && root.hostWidget.selectedProviderKey === root.hostWidget.libraryProviderKey
-              width: parent.width
-              height: Style.space(48)
-              radius: Style.cornerRadius
-              color: libraryLinkMouse.containsMouse ? root.tint(root.adobe, 0.28) : root.tint(root.adobe, 0.15)
-              border.width: 1
-              border.color: root.adobe
-              SafeText {
-                anchors.centerIn: parent
-                text: "BROWSE ARTISTS AND ALBUMS  ›"
-                color: root.sand
-                font.family: root.panelFont
-                font.pixelSize: Style.font.caption
-                font.bold: true
-                font.letterSpacing: 1.1
-              }
-              MouseArea {
-                id: libraryLinkMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  root.libraryTab = "library"
-                  browserFlick.contentY = 0
-                  if (root.hostWidget) root.hostWidget.showLibrary(true)
-                }
-              }
-            }
-
             SafeText {
               visible: root.hostWidget && root.hostWidget.providerCollections.length > 0
-              text: root.hostWidget && (root.hostWidget.selectedProviderKey === "local"
-                  || root.hostWidget.selectedProviderKey === root.hostWidget.libraryProviderKey)
+              text: root.hostWidget && root.hostWidget.selectedProviderKey === "local"
                 ? "LOCAL COLLECTIONS" : "DIRECTORY STATIONS"
               color: root.adobe
               font.family: root.panelFont
@@ -1349,12 +1318,10 @@ Panel {
                 model: root.hostWidget ? root.hostWidget.providerResults : []
                 Rectangle {
                   required property var modelData
-                  readonly property bool libraryTrack: root.hostWidget
-                    && root.hostWidget.selectedProviderKey === root.hostWidget.libraryProviderKey
-                  readonly property bool favoritable: libraryTrack || (root.hostWidget
-                    && root.hostWidget.selectedProviderKey === "radio")
+                  readonly property bool favoritable: root.hostWidget
+                    && root.hostWidget.selectedProviderKey === "radio"
                   readonly property bool starred: favoritable
-                    && (libraryTrack ? modelData.bookmark === true : root.hostWidget.isSearchFavorite(modelData))
+                    && root.hostWidget.isSearchFavorite(modelData)
                   width: browserColumn.width
                   height: Style.space(38)
                   radius: Style.cornerRadius
@@ -1415,13 +1382,9 @@ Panel {
                     anchors.bottom: parent.bottom
                     width: Style.space(42)
                     visible: favoritable
-                    enabled: visible && root.hostWidget && (libraryTrack || !root.hostWidget.searchFavoritesBusy)
+                    enabled: visible && root.hostWidget && !root.hostWidget.searchFavoritesBusy
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                      if (!root.hostWidget) return
-                      if (libraryTrack) root.hostWidget.toggleTrackFavorite(modelData)
-                      else root.hostWidget.toggleSearchFavorite(modelData)
-                    }
+                    onClicked: if (root.hostWidget) root.hostWidget.toggleSearchFavorite(modelData)
                   }
                 }
               }
@@ -1599,19 +1562,6 @@ Panel {
               || view === "artistAlbums" || view === "playlists"
             readonly property bool tracksView: view === "tracks" || view === "search" || view === "playlistTracks"
 
-            SafeText {
-              visible: !libraryBody.available
-              width: parent.width
-              text: libraryBody.host && libraryBody.host.providerBusy
-                ? "LOADING SOURCES…"
-                : "The Library is not available. It needs a CLIAMP build with the Library provider, installed as /usr/bin/cliamp."
-              color: root.sand
-              opacity: 0.88
-              font.family: root.panelFont
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-            }
-
             Row {
               width: parent.width
               spacing: Style.space(8)
@@ -1667,7 +1617,7 @@ Panel {
                 border.color: root.turquoise
                 SafeText {
                   anchors.centerIn: parent
-                  text: libraryBody.host && libraryBody.host.providerBusy ? "WAIT…" : "SEARCH"
+                  text: libraryBody.host && libraryBody.host.libraryBusy ? "WAIT…" : "SEARCH"
                   color: root.sand
                   font.family: root.panelFont
                   font.pixelSize: Style.font.caption
@@ -1970,8 +1920,9 @@ Panel {
                     anchors.right: parent.right
                     anchors.rightMargin: Style.space(5)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: libraryRow.modelData.bookmark ? "★" : "☆"
-                    color: libraryRow.modelData.bookmark ? root.adobe : root.turquoise
+                    readonly property bool hearted: libraryBody.host && libraryBody.host.isLibraryFavorite(libraryRow.modelData)
+                    text: hearted ? "★" : "☆"
+                    color: hearted ? root.adobe : root.turquoise
                     font.family: root.panelFont
                     font.pixelSize: Style.font.body
                     horizontalAlignment: Text.AlignHCenter
@@ -2116,7 +2067,7 @@ Panel {
               border.color: root.turquoise
               SafeText {
                 anchors.centerIn: parent
-                text: libraryBody.host && libraryBody.host.providerBusy ? "LOADING…" : "LOAD MORE"
+                text: libraryBody.host && libraryBody.host.libraryBusy ? "LOADING…" : "LOAD MORE"
                 color: root.sand
                 font.family: root.panelFont
                 font.pixelSize: Style.font.caption
@@ -2127,7 +2078,7 @@ Panel {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: if (root.hostWidget && !root.hostWidget.providerBusy) root.hostWidget.loadLibraryPage(false)
+                onClicked: if (root.hostWidget && !root.hostWidget.libraryBusy) root.hostWidget.loadLibraryPage(false)
               }
             }
 
@@ -2269,7 +2220,7 @@ Panel {
               SafeText {
                 visible: libraryBody.host && libraryBody.host.libraryScanning
                 width: parent.width
-                text: "SCANNING… THE COUNTS ABOVE UPDATE AS CLIAMP READS THE FILES."
+                text: libraryBody.host ? libraryBody.host.libraryScanSummary : ""
                 color: root.turquoise
                 font.family: root.panelFont
                 font.pixelSize: Style.font.caption
@@ -2459,7 +2410,7 @@ Panel {
             }
 
             SafeText {
-              visible: libraryBody.showing && libraryBody.host && libraryBody.host.providerBusy
+              visible: libraryBody.showing && libraryBody.host && libraryBody.host.libraryBusy
                 && !libraryBody.host.libraryLoaded && libraryBody.view !== "folders"
               text: "LOADING…"
               color: root.sand
@@ -2470,7 +2421,7 @@ Panel {
 
             SafeText {
               visible: libraryBody.showing && libraryBody.host && libraryBody.host.libraryLoaded
-                && !libraryBody.host.providerBusy
+                && !libraryBody.host.libraryBusy
                 && ((libraryBody.cardsView && libraryBody.host.libraryCards.length === 0)
                   || (libraryBody.tracksView && libraryBody.host.libraryTracks.length === 0))
               width: parent.width

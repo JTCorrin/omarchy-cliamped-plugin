@@ -59,9 +59,11 @@ BarWidget {
   property string providerRequestKind: ""
   property bool providerBusy: false
   property bool providerSearchAttempted: false
-  // The Library is CLIAMP's indexed folders, such as a share on a NAS. Its
-  // views never touch the Browse state above.
-  readonly property string libraryProviderKey: "library"
+  // The Library is the plugin's own index of music folders, such as a share on
+  // a NAS (cliamped_library.py). It plays through CLIAMP and keeps playlists and
+  // favorites in CLIAMP's built-in "local" source, so it works with any CLIAMP.
+  // Its views never touch the Browse state above.
+  readonly property string libraryProviderKey: "local"
   readonly property int libraryPageSize: 60
   readonly property int maxLibraryItems: 600
   property string libraryTop: "artists"
@@ -96,10 +98,19 @@ BarWidget {
   property int libraryWritesPending: 0
   property string libraryWriteNotice: ""
   property bool libraryScanning: false
+  property var libraryScanInfo: ({ phase: "", dirs: 0, pending: 0, tracks: 0 })
   property bool libraryArtistsStale: false
   property bool libraryWriteFailed: false
-  property int libraryPollsLeft: 0
-  property int libraryPollTracks: -1
+  property bool libraryAutoScanned: false
+  property bool libraryScanFresh: false
+  property int libraryScanStepsLeft: 0
+  property int libraryScanTracks: -1
+  property var libraryFavorites: ({})
+  property var libraryHelperQueue: []
+  property var libraryHelperCurrent: null
+  property bool libraryHelperBusy: false
+  property bool libraryHelperTimedOut: false
+  property bool libraryScanTimedOut: false
   property int radioCatalogOffset: 0
   property bool radioCatalogHasMore: true
   property bool radioCatalogRequested: false
@@ -146,12 +157,15 @@ BarWidget {
   })
 
   readonly property bool playing: state === "playing"
-  readonly property bool libraryAvailable: {
-    for (var i = 0; i < providers.length; ++i) {
-      var entry = providers[i]
-      if (entry.key === libraryProviderKey && entry.browse_artists && entry.browse_albums) return true
-    }
-    return false
+  // The library is the plugin's own, so it needs nothing from CLIAMP to list.
+  readonly property bool libraryAvailable: true
+  readonly property bool libraryBusy: libraryHelperBusy || libraryHelperQueue.length > 0 || providerBusy
+  readonly property string libraryScanSummary: {
+    if (!libraryScanning) return ""
+    var info = libraryScanInfo
+    if (info.phase === "walk") return "SCANNING… " + info.dirs + " FOLDERS LEFT TO LOOK AT, " + info.tracks + " TRACKS INDEXED"
+    if (info.phase === "tags") return "READING TAGS… " + info.pending + " FILES LEFT, " + info.tracks + " TRACKS INDEXED"
+    return "SCANNING…"
   }
   // The cards of the Library view that lists artists or albums.
   readonly property var libraryCards: {
@@ -635,9 +649,10 @@ BarWidget {
   }
 
   function isLibraryKind(kind) {
-    return kind === "libArtists" || kind === "libAlbums" || kind === "libTracks"
-      || kind === "libSearch" || kind === "libLoad" || kind === "libFavorite"
-      || kind === "libRoots" || kind === "libPlaylists" || kind === "libPlaylistWrite"
+    // The requests of the library helper (artists, albums, search, folders) have
+    // their own queue. These go to CLIAMP.
+    return kind === "libTracks" || kind === "libLoad" || kind === "libFavorite" || kind === "libFavorites"
+      || kind === "libPlaylists" || kind === "libPlaylistWrite"
   }
 
   function isProviderKind(kind) {
@@ -673,7 +688,7 @@ BarWidget {
     var pending = ipcQueue.slice()
     // Polls and slider updates are snapshots. Keep only their newest pending
     // value so an unavailable peer cannot grow the resident work queue.
-    if (["status", "queueList", "history", "lyrics", "devices", "volumeAction", "search", "libSearch"].indexOf(kind) >= 0) {
+    if (["status", "queueList", "history", "lyrics", "devices", "volumeAction", "search"].indexOf(kind) >= 0) {
       var compacted = []
       for (var i = 0; i < pending.length; ++i)
         if (pending[i].kind !== kind) compacted.push(pending[i])
@@ -818,37 +833,95 @@ BarWidget {
     })
   }
 
+  // A request to CLIAMP (playlists, favorites, playing).
   function runLibraryRequest(kind, request) {
     libraryError = ""
     return enqueueIpc(kind, request, [])
   }
 
+  function libraryHelperPath() {
+    return String(Qt.resolvedUrl("cliamped_library.py")).replace(/^file:\/\//, "")
+  }
+
+  // A request to the library helper (scan results, artists, albums, search).
+  // They are served one at a time, apart from CLIAMP's queue, so browsing never
+  // waits for a track to load.
+  function runLibraryHelper(kind, request) {
+    libraryError = ""
+    return enqueueLibraryHelper(kind, request)
+  }
+
+  function enqueueLibraryHelper(kind, request) {
+    if (destroying) return false
+    var encoded = ""
+    try { encoded = JSON.stringify(request) } catch (e) { return false }
+    if (!encoded || encoded.length > 16000) {
+      libraryError = "The library request exceeded the plugin limit."
+      return false
+    }
+    var pending = libraryHelperQueue.slice()
+    // A search is a snapshot: only the newest one is worth asking.
+    if (kind === "libSearch") pending = pending.filter(function(item) { return item.kind !== kind })
+    if (pending.length >= 12) {
+      libraryError = "The library is busy; wait for the pending request to finish."
+      return false
+    }
+    pending.push({ kind: cleanText(kind, 32), request: request })
+    libraryHelperQueue = pending
+    pumpLibraryHelper()
+    return true
+  }
+
+  function pumpLibraryHelper() {
+    if (destroying || libraryHelperBusy || libraryProcess.running || !libraryHelperQueue.length) return
+    var pending = libraryHelperQueue.slice()
+    libraryHelperCurrent = pending.shift()
+    libraryHelperQueue = pending
+    libraryHelperBusy = true
+    libraryHelperTimedOut = false
+    libraryProcess.command = ["/usr/bin/python3", "-I", libraryHelperPath(),
+      JSON.stringify(libraryHelperCurrent.request)]
+    libraryProcess.launchPending = true
+    libraryWatchdog.restart()
+    libraryProcess.running = true
+  }
+
+  function finishLibraryHelper() {
+    libraryHelperBusy = false
+    libraryHelperCurrent = null
+    Qt.callLater(pumpLibraryHelper)
+  }
+
+  function handleLibraryHelperStartFailure() {
+    libraryWatchdog.stop()
+    libraryKill.stop()
+    libraryHelperTimedOut = false
+    libraryError = "Could not start the bounded library helper."
+    finishLibraryHelper()
+  }
+
   // True when a response still belongs to what the Library view shows. The
-  // queue is serial, but the user can change the view while a request waits.
+  // queues are serial, but the user can change the view while a request waits.
   function libraryRequestIsCurrent(item) {
     if (!item || !item.request) return false
     var request = item.request
-    if (request.cmd === "provider.artists") return libraryView === "artists"
-    if (request.cmd === "provider.albums")
+    if (request.op === "artists") return libraryView === "artists"
+    if (request.op === "albums")
       return libraryView === "albums" && String(request.sort || "") === librarySort
-    if (request.cmd === "provider.artist_albums")
+    if (request.op === "artist_albums")
       return libraryView === "artistAlbums" && request.artist === libraryArtistId
-    if (request.cmd === "provider.album_tracks")
+    if (request.op === "album_tracks")
       return libraryView === "tracks" && request.album === libraryAlbumId
+    if (request.op === "search")
+      return libraryView === "search" && request.query === librarySearchQuery
     if (request.cmd === "provider.tracks")
       return libraryView === "playlistTracks" && request.playlist === libraryPlaylistId
-    if (request.cmd === "provider.search")
-      return libraryView === "search" && request.query === librarySearchQuery
     return false
   }
 
   function showLibrary(force) {
-    if (!providers.length) {
-      refreshProviders()
-      return
-    }
-    if (!libraryAvailable) return
     if (force || !libraryRootsLoaded) refreshLibraryRoots()
+    if (force || !Object.keys(libraryFavorites).length) refreshLibraryFavorites()
     if (libraryView === "artists" || libraryView === "albums") {
       if (force || (libraryView === "artists" ? !libraryArtists.length : !libraryAlbums.length))
         loadLibraryPage(true)
@@ -858,21 +931,17 @@ BarWidget {
   }
 
   function loadLibraryPage(reset) {
-    if (!libraryAvailable) return
     var view = libraryView
     var offset = 0
     if (!reset) offset = view === "artists" ? libraryArtists.length : libraryAlbums.length
     var request = null
     if (view === "artists") {
-      request = { cmd: "provider.artists", provider: libraryProviderKey, offset: offset, limit: libraryPageSize }
+      request = { op: "artists", offset: offset, limit: libraryPageSize }
     } else if (view === "albums") {
-      request = { cmd: "provider.albums", provider: libraryProviderKey, offset: offset, limit: libraryPageSize }
+      request = { op: "albums", offset: offset, limit: libraryPageSize }
       if (librarySort) request.sort = librarySort
     } else if (view === "artistAlbums" && libraryArtistId) {
-      request = {
-        cmd: "provider.artist_albums", provider: libraryProviderKey,
-        artist: libraryArtistId, offset: offset, limit: libraryPageSize
-      }
+      request = { op: "artist_albums", artist: libraryArtistId, offset: offset, limit: libraryPageSize }
     }
     if (!request) return
     if (reset) {
@@ -884,7 +953,7 @@ BarWidget {
         libraryAlbumsMore = false
       }
     }
-    runLibraryRequest(view === "artists" ? "libArtists" : "libAlbums", request)
+    runLibraryHelper(view === "artists" ? "libArtists" : "libAlbums", request)
   }
 
   function showLibraryTop(top) {
@@ -931,10 +1000,7 @@ BarWidget {
     libraryView = "tracks"
     libraryTracks = []
     libraryLoaded = false
-    runLibraryRequest("libTracks", {
-      cmd: "provider.album_tracks", provider: libraryProviderKey,
-      album: safeId, offset: 0, limit: 200
-    })
+    runLibraryHelper("libTracks", { op: "album_tracks", album: safeId, offset: 0, limit: 200 })
   }
 
   function libraryBack() {
@@ -992,66 +1058,121 @@ BarWidget {
 
   function searchLibrary(query) {
     var value = cleanText(query, 256).trim()
-    if (!value || !libraryAvailable) return
+    if (!value) return
     librarySearchQuery = value
     libraryView = "search"
     libraryTracks = []
     libraryLoaded = false
     librarySearchAttempted = true
-    runLibraryRequest("libSearch", {
-      cmd: "provider.search", provider: libraryProviderKey, query: value, limit: 50
-    })
+    runLibraryHelper("libSearch", { op: "search", query: value, limit: 50 })
   }
 
   // A refresh in the background must not wipe the error of an action, so the
-  // folder and playlist lists load without clearing it.
+  // folder list loads without clearing it.
   function refreshLibraryRoots() {
-    enqueueIpc("libRoots", { cmd: "library.roots" }, [])
-  }
-
-  // Looks at the folder sizes every few seconds while CLIAMP scans, so the
-  // lists catch up, until CLIAMP says that the scan ended. The count of looks
-  // is the bound: about thirteen minutes, and none are sent while the panel is
-  // closed.
-  function startLibraryPolling() {
-    libraryPollsLeft = 200
-    libraryPollTracks = -1
-    libraryPollTimer.restart()
-  }
-
-  function pollLibrary() {
-    if (destroying || libraryPollsLeft <= 0) {
-      libraryPollTimer.stop()
-      return
-    }
-    libraryPollsLeft -= 1
-    if (panelLoader.item && panelLoader.item.opened === true) refreshLibraryRoots()
+    enqueueLibraryHelper("libRoots", { op: "roots" })
   }
 
   function addLibraryRoot(path) {
     var safePath = opaqueText(path, 4096)
     if (!safePath) {
-      libraryError = "CLIAMPed cannot send that folder: its name has control or invisible characters."
+      libraryError = "CLIAMPed cannot use that folder: its name has control or invisible characters."
       return
     }
     libraryNotice = ""
-    runLibraryRequest("libRoots", { cmd: "library.add_root", path: safePath })
+    runLibraryHelper("libRoots", { op: "add_root", path: safePath })
   }
 
   function removeLibraryRoot(path) {
     var safePath = opaqueText(path, 4096)
     if (!safePath) return
     libraryNotice = ""
-    runLibraryRequest("libRoots", { cmd: "library.remove_root", path: safePath })
+    runLibraryHelper("libRoots", { op: "remove_root", path: safePath })
   }
 
   function rescanLibrary() {
     libraryNotice = ""
-    runLibraryRequest("libRoots", { cmd: "library.scan" })
+    startLibraryScan(true)
+  }
+
+  // Scans in steps. Each step is one short helper process that works for a few
+  // seconds and says whether the scan goes on, so no process runs for long,
+  // the lists fill in while it works, and a restart of the shell loses nothing.
+  // fresh begins a new scan unless one is under way; without it a scan that
+  // the helper already began (a folder was just added) is continued.
+  function startLibraryScan(fresh) {
+    if (destroying) return
+    libraryScanning = true
+    libraryScanFresh = fresh === true
+    libraryScanStepsLeft = 4000
+    libraryScanTracks = -1
+    libraryScanTimer.interval = 50
+    if (!libraryScanProcess.running) libraryScanTimer.restart()
+  }
+
+  function scanLibraryStep() {
+    if (destroying || libraryScanProcess.running) return
+    if (libraryScanStepsLeft <= 0) {
+      libraryScanning = false
+      return
+    }
+    libraryScanStepsLeft -= 1
+    var request = { op: "scan", budget: 8 }
+    if (libraryScanFresh) {
+      request.fresh = true
+      libraryScanFresh = false
+    }
+    libraryScanTimedOut = false
+    libraryScanProcess.command = ["/usr/bin/python3", "-I", libraryHelperPath(), JSON.stringify(request)]
+    libraryScanProcess.launchPending = true
+    libraryScanWatchdog.restart()
+    libraryScanProcess.running = true
+  }
+
+  function handleLibraryScanStartFailure() {
+    libraryScanWatchdog.stop()
+    libraryScanKill.stop()
+    libraryScanning = false
+    libraryError = "Could not start the bounded library scan."
+  }
+
+  function applyLibraryScan(response) {
+    if (Array.isArray(response.roots)) libraryRoots = normalizeLibraryRoots(response.roots)
+    libraryRootsLoaded = true
+    libraryScanInfo = {
+      phase: cleanText(response.phase, 16),
+      dirs: cleanInteger(response.dirs, 0, 1000000000, 0),
+      pending: cleanInteger(response.pending, 0, 1000000000, 0),
+      tracks: cleanInteger(response.tracks, 0, 1000000000, 0)
+    }
+    var scanning = response.scanning === true
+    // The lists on screen catch up as tracks arrive, and once more at the end.
+    if (libraryScanInfo.tracks !== libraryScanTracks || (libraryScanning && !scanning)) {
+      libraryScanTracks = libraryScanInfo.tracks
+      staleLibraryLists()
+    }
+    libraryScanning = scanning
+    if (scanning) {
+      // A busy reply means another step is running, so wait longer before asking.
+      libraryScanTimer.interval = response.busy === true ? 2000 : 100
+      libraryScanTimer.restart()
+    }
   }
 
   function refreshLibraryPlaylists() {
     enqueueIpc("libPlaylists", { cmd: "provider.playlists", provider: libraryProviderKey }, [])
+  }
+
+  // The tracks that CLIAMP knows as favorites, so the rows can show their stars.
+  // It reads up to 1,024 of them, 256 at a time.
+  function refreshLibraryFavorites() {
+    enqueueIpc("libFavorites", {
+      cmd: "provider.tracks", provider: libraryProviderKey, playlist: "Favorites", offset: 0, limit: 256
+    }, [])
+  }
+
+  function isLibraryFavorite(track) {
+    return !!track && libraryFavorites[track.path] === true
   }
 
   // Marks the lists that were read before the index changed as out of date.
@@ -1169,29 +1290,13 @@ BarWidget {
   }
 
   // Toggles the favorite heart of a track. CLIAMP keeps the hearts of every
-  // provider in one list, shown as Favorites under Browse.
+  // source in one list, which it shows as Favorites.
   function toggleTrackFavorite(track) {
     var safeTrack = normalizeTrack(track)
     if (!safeTrack) return
     runLibraryRequest("libFavorite", {
       cmd: "playlist.bookmark", provider: libraryProviderKey, track: safeTrack
     })
-  }
-
-  // Returns the tracks with the heart of the track at path flipped.
-  function flipFavorite(tracks, path) {
-    var result = []
-    for (var i = 0; i < tracks.length; ++i) {
-      var track = tracks[i]
-      if (track.path === path) {
-        var copy = Object.assign({}, track)
-        copy.bookmark = !track.bookmark
-        result.push(copy)
-      } else {
-        result.push(track)
-      }
-    }
-    return result
   }
 
   function cycleLibrarySort() {
@@ -1204,14 +1309,85 @@ BarWidget {
     loadLibraryPage(true)
   }
 
-  // Loads the open album into the queue and plays it from startIndex.
+  // Loads the open album into the queue and plays it from startIndex. The helper
+  // writes the album as a playlist file, which CLIAMP loads in one request.
   function playLibraryAlbum(startIndex) {
     if (!libraryAlbumId) return
     libraryPendingIndex = cleanInteger(startIndex, 0, 1000000, 0)
     loadedProviderPlaylistId = ""
-    runLibraryRequest("libLoad", {
-      cmd: "provider.load_album", provider: libraryProviderKey, album: libraryAlbumId
-    })
+    runLibraryHelper("libQueueFile", { op: "queue_file", album: libraryAlbumId })
+  }
+
+  // Applies the reply of a library helper request. current is the request that was sent.
+  function applyLibraryResult(kind, request, response) {
+    var item = { request: request }
+    if (kind === "libArtists") {
+      // A later page is dropped when the list was reset while it waited.
+      if (libraryRequestIsCurrent(item) && (request.offset === 0 || request.offset === libraryArtists.length)) {
+        var artistPage = normalizeLibraryArtists(response.artists)
+        libraryArtists = (request.offset > 0 ? libraryArtists : [])
+          .concat(artistPage).slice(0, maxLibraryItems)
+        libraryArtistsMore = artistPage.length > 0
+          && request.offset + artistPage.length < cleanInteger(response.total, 0, 1000000000, 0)
+          && libraryArtists.length < maxLibraryItems
+        libraryLoaded = true
+      }
+    } else if (kind === "libAlbums") {
+      if (libraryRequestIsCurrent(item) && (request.offset === 0 || request.offset === libraryAlbums.length)) {
+        var albumPage = normalizeLibraryAlbums(response.albums)
+        libraryAlbums = (request.offset > 0 ? libraryAlbums : [])
+          .concat(albumPage).slice(0, maxLibraryItems)
+        if (response.sorts) librarySorts = normalizeLibrarySorts(response.sorts)
+        libraryAlbumsMore = albumPage.length > 0
+          && request.offset + albumPage.length < cleanInteger(response.total, 0, 1000000000, 0)
+          && libraryAlbums.length < maxLibraryItems
+        libraryLoaded = true
+      }
+    } else if (kind === "libTracks") {
+      // The tracks of an album.
+      if (libraryRequestIsCurrent(item)) {
+        libraryTracks = normalizeTracks(response.tracks, 200)
+        libraryLoaded = true
+      }
+    } else if (kind === "libSearch") {
+      if (libraryRequestIsCurrent(item)) {
+        libraryTracks = normalizeTracks(response.tracks, 100)
+        libraryLoaded = true
+      }
+    } else if (kind === "libRoots") {
+      var firstRoots = !libraryRootsLoaded
+      if (Array.isArray(response.roots)) libraryRoots = normalizeLibraryRoots(response.roots)
+      libraryRootsLoaded = true
+      // A library with no folder has nothing to browse: the first time that
+      // this is learned, show where to add one. Later looks do not move the user.
+      if (firstRoots && !libraryRoots.length && (libraryView === "artists" || libraryView === "albums")) {
+        libraryTop = "folders"
+        libraryView = "folders"
+      }
+      if (request.op === "remove_root") {
+        libraryArtists = []
+        libraryAlbums = []
+        libraryTracks = []
+        libraryArtistsStale = false
+        if (libraryView === "artists" || libraryView === "albums") loadLibraryPage(true)
+      }
+      if (request.op === "add_root") {
+        // The helper has begun a scan of the new folder: carry it on.
+        startLibraryScan(false)
+      } else if (response.scanning === true && !libraryScanning) {
+        // A scan that an earlier run began and left unfinished.
+        startLibraryScan(false)
+      } else if (firstRoots && libraryRoots.length && !libraryAutoScanned) {
+        // Look for new and changed files once for each start of the shell.
+        libraryAutoScanned = true
+        startLibraryScan(true)
+      }
+    } else if (kind === "libQueueFile") {
+      // Replace the queue with the album, in one request to CLIAMP.
+      var queued = enqueueIpc("queueMutation", { cmd: "queue.clear" }, [])
+        && enqueueIpc("libLoad", { cmd: "url.load", path: opaqueText(response.path, 4096), play: true }, [])
+      if (!queued) libraryError = "CLIAMP is not ready; try again in a moment."
+    }
   }
 
   function showFavorites() {
@@ -1659,7 +1835,8 @@ BarWidget {
           root.modeKnown = false
           if (!daemon.running && !root.startingDaemon && !root.destroying) root.startOwnedDaemon(false)
         } else if (root.isLibraryKind(kind)) {
-          root.libraryError = message
+          // The stars come from a list that may not exist yet; its absence is not an error.
+          if (kind !== "libFavorites") root.libraryError = message
           if (kind === "libPlaylistWrite") root.finishLibraryWrite(false)
         } else if (kind === "providers" || kind === "playlists" || kind === "catalog"
             || kind === "favorite" || kind === "search" || kind === "load" || kind === "urlLoad") {
@@ -1735,81 +1912,24 @@ BarWidget {
         root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
         root.currentIndex = root.queueTracks.length ? 0 : -1
         actionRefresh.restart()
-      } else if (kind === "libArtists") {
-        // A later page is dropped when the list was reset while it waited.
-        if (root.libraryRequestIsCurrent(current)
-            && (current.request.offset === 0 || current.request.offset === root.libraryArtists.length)) {
-          var artistPage = root.normalizeLibraryArtists(response.artists)
-          var artistOffset = current.request.offset
-          root.libraryArtists = (artistOffset > 0 ? root.libraryArtists : [])
-            .concat(artistPage).slice(0, root.maxLibraryItems)
-          root.libraryArtistsMore = artistPage.length > 0
-            && artistOffset + artistPage.length < root.cleanInteger(response.total, 0, 1000000000, 0)
-            && root.libraryArtists.length < root.maxLibraryItems
-          root.libraryLoaded = true
-        }
-      } else if (kind === "libAlbums") {
-        if (root.libraryRequestIsCurrent(current)
-            && (current.request.offset === 0 || current.request.offset === root.libraryAlbums.length)) {
-          var albumPage = root.normalizeLibraryAlbums(response.albums)
-          var albumOffset = current.request.offset
-          root.libraryAlbums = (albumOffset > 0 ? root.libraryAlbums : [])
-            .concat(albumPage).slice(0, root.maxLibraryItems)
-          if (response.sorts) root.librarySorts = root.normalizeLibrarySorts(response.sorts)
-          // CLIAMP's album list reports the size of the page, not the library,
-          // so a full page is the only sign that more albums follow.
-          var moreAlbums = current.request.cmd === "provider.albums"
-            ? albumPage.length >= root.libraryPageSize
-            : albumOffset + albumPage.length < root.cleanInteger(response.total, 0, 1000000000, 0)
-          root.libraryAlbumsMore = moreAlbums && albumPage.length > 0
-            && root.libraryAlbums.length < root.maxLibraryItems
-          root.libraryLoaded = true
-        }
       } else if (kind === "libTracks") {
+        // The tracks of a saved playlist.
         if (root.libraryRequestIsCurrent(current)) {
           root.libraryTracks = root.normalizeTracks(response.tracks, 200)
           root.libraryLoaded = true
         }
-      } else if (kind === "libSearch") {
-        if (root.libraryRequestIsCurrent(current)) {
-          root.libraryTracks = root.normalizeTracks(response.tracks, 50)
-          root.libraryLoaded = true
-        }
-      } else if (kind === "libRoots") {
-        var firstRoots = !root.libraryRootsLoaded
-        var wasScanning = root.libraryScanning
-        var command = current && current.request ? current.request.cmd : ""
-        if (Array.isArray(response.roots)) root.libraryRoots = root.normalizeLibraryRoots(response.roots)
-        root.libraryRootsLoaded = true
-        root.libraryScanning = response.scanning === true
-        // A library with no folder has nothing to browse: the first time that
-        // this is learned, show where to add one. Later looks do not move the user.
-        if (firstRoots && !root.libraryRoots.length && (root.libraryView === "artists" || root.libraryView === "albums")) {
-          root.libraryTop = "folders"
-          root.libraryView = "folders"
-        }
-        if (command === "library.remove_root") {
-          root.libraryArtists = []
-          root.libraryAlbums = []
-          root.libraryTracks = []
-          root.libraryArtistsStale = false
-          if (root.libraryView === "artists" || root.libraryView === "albums") root.loadLibraryPage(true)
-        }
-        if (root.libraryScanning) {
-          // Only a successful add or scan reaches this branch, so a refused
-          // folder never starts the polling.
-          if (!libraryPollTimer.running) root.startLibraryPolling()
-          var total = root.libraryTotalTracks
-          if (total !== root.libraryPollTracks) {
-            root.libraryPollTracks = total
-            root.staleLibraryLists()
-          }
-        } else if (wasScanning || command === "library.add_root" || command === "library.scan") {
-          // The scan ended, or was over before the first look: read the lists again.
-          root.libraryPollsLeft = 0
-          libraryPollTimer.stop()
-          root.staleLibraryLists()
-        }
+      } else if (kind === "libFavorites") {
+        // Pages of the favorites, joined into the set that the stars read.
+        var favoritePage = root.normalizeTracks(response.tracks, 256)
+        var favoriteOffset = current && current.request ? current.request.offset : 0
+        var favorites = favoriteOffset > 0 ? Object.assign({}, root.libraryFavorites) : ({})
+        for (var f = 0; f < favoritePage.length; ++f) favorites[favoritePage[f].path] = true
+        root.libraryFavorites = favorites
+        if (favoritePage.length === 256 && favoriteOffset + 256 < 1024)
+          root.enqueueIpc("libFavorites", {
+            cmd: "provider.tracks", provider: root.libraryProviderKey, playlist: "Favorites",
+            offset: favoriteOffset + 256, limit: 256
+          }, [])
       } else if (kind === "libPlaylists") {
         root.libraryPlaylists = root.normalizePlaylists(response.playlists)
         if (root.libraryView === "playlists") root.libraryLoaded = true
@@ -1819,12 +1939,11 @@ BarWidget {
         var heartPath = current && current.request && current.request.track
           ? current.request.track.path : ""
         if (heartPath) {
-          root.libraryTracks = root.flipFavorite(root.libraryTracks, heartPath)
-          root.providerResults = root.flipFavorite(root.providerResults, heartPath)
+          var hearts = Object.assign({}, root.libraryFavorites)
+          if (hearts[heartPath] === true) delete hearts[heartPath]
+          else hearts[heartPath] = true
+          root.libraryFavorites = hearts
         }
-        // Browse lists the hearts as a collection, so its count is now stale.
-        if (root.selectedProviderKey === root.libraryProviderKey)
-          root.runProviderRequest("playlists", { cmd: "provider.playlists", provider: root.libraryProviderKey })
       } else if (kind === "libLoad") {
         root.queueTracks = root.normalizeTracks(response.tracks, root.maxTrackItems)
         root.currentIndex = root.queueTracks.length ? 0 : -1
@@ -1859,6 +1978,72 @@ BarWidget {
       root.providerTimedOut = false
       if (kind === "load" || kind === "libLoad" || kind === "play" || kind === "queueMutation") queueRefresh.restart()
       root.finishIpc()
+    }
+  }
+
+  // The library helper: artists, albums, search and folders.
+  Process {
+    id: libraryProcess
+    property bool launchPending: false
+    command: ["/usr/bin/true"]
+    clearEnvironment: true
+    environment: root.processEnvironment
+    stdout: StdioCollector { id: libraryOut; waitForEnd: true }
+    onStarted: launchPending = false
+    onRunningChanged: {
+      if (!running && launchPending) {
+        launchPending = false
+        root.handleLibraryHelperStartFailure()
+      }
+    }
+    onExited: function(exitCode) {
+      launchPending = false
+      libraryWatchdog.stop()
+      libraryKill.stop()
+      var current = root.libraryHelperCurrent
+      var response = null
+      try { response = JSON.parse(String(libraryOut.text || "")) } catch (e) {}
+      if (root.libraryHelperTimedOut || exitCode !== 0 || !response || !response.ok) {
+        root.libraryError = response && response.error ? root.cleanText(response.error, 1024)
+          : root.libraryHelperTimedOut ? "The library request exceeded its deadline." : "The library helper failed."
+      } else if (current) {
+        root.applyLibraryResult(current.kind, current.request, response)
+      }
+      root.libraryHelperTimedOut = false
+      root.finishLibraryHelper()
+    }
+  }
+
+  // The library scan, one short step at a time.
+  Process {
+    id: libraryScanProcess
+    property bool launchPending: false
+    command: ["/usr/bin/true"]
+    clearEnvironment: true
+    environment: root.processEnvironment
+    stdout: StdioCollector { id: libraryScanOut; waitForEnd: true }
+    onStarted: launchPending = false
+    onRunningChanged: {
+      if (!running && launchPending) {
+        launchPending = false
+        root.handleLibraryScanStartFailure()
+      }
+    }
+    onExited: function(exitCode) {
+      launchPending = false
+      libraryScanWatchdog.stop()
+      libraryScanKill.stop()
+      if (root.destroying) return
+      var response = null
+      try { response = JSON.parse(String(libraryScanOut.text || "")) } catch (e) {}
+      if (root.libraryScanTimedOut || exitCode !== 0 || !response || !response.ok) {
+        root.libraryScanning = false
+        root.libraryError = response && response.error ? root.cleanText(response.error, 1024)
+          : root.libraryScanTimedOut ? "A step of the library scan exceeded its deadline." : "The library scan failed."
+        root.libraryScanTimedOut = false
+        return
+      }
+      root.applyLibraryScan(response)
     }
   }
 
@@ -1939,10 +2124,44 @@ BarWidget {
   }
   Timer { id: actionRefresh; interval: 250; onTriggered: root.probe() }
   Timer {
-    id: libraryPollTimer
-    interval: 4000
-    repeat: true
-    onTriggered: root.pollLibrary()
+    id: libraryScanTimer
+    interval: 100
+    repeat: false
+    onTriggered: root.scanLibraryStep()
+  }
+  Timer {
+    id: libraryWatchdog
+    interval: 20000
+    repeat: false
+    onTriggered: {
+      if (!libraryProcess.running) return
+      root.libraryHelperTimedOut = true
+      libraryProcess.signal(15)
+      libraryKill.restart()
+    }
+  }
+  Timer {
+    id: libraryKill
+    interval: 1500
+    repeat: false
+    onTriggered: if (libraryProcess.running) libraryProcess.signal(9)
+  }
+  Timer {
+    id: libraryScanWatchdog
+    interval: 40000
+    repeat: false
+    onTriggered: {
+      if (!libraryScanProcess.running) return
+      root.libraryScanTimedOut = true
+      libraryScanProcess.signal(15)
+      libraryScanKill.restart()
+    }
+  }
+  Timer {
+    id: libraryScanKill
+    interval: 1500
+    repeat: false
+    onTriggered: if (libraryScanProcess.running) libraryScanProcess.signal(9)
   }
   Timer {
     id: volumeCommit
@@ -2019,7 +2238,8 @@ BarWidget {
   Component.onCompleted: refreshSearchFavorites()
   Component.onDestruction: {
     root.destroying = true
-    libraryPollTimer.stop()
+    libraryScanTimer.stop()
+    root.libraryHelperQueue = []
     root.ipcQueue = []
     root.ipcCurrent = null
     root.pendingAfterStart = null
@@ -2034,6 +2254,8 @@ BarWidget {
     // Destruction also destroys watchdog timers, so use a terminal signal.
     // The daemon supervisor's guardian tears down CLIAMP's process group.
     if (providerProcess.running) providerProcess.signal(9)
+    if (libraryProcess.running) libraryProcess.signal(9)
+    if (libraryScanProcess.running) libraryScanProcess.signal(9)
     if (searchFavoriteProcess.running) searchFavoriteProcess.signal(9)
     if (root.ownsDaemon && daemon.running) daemon.signal(9)
   }

@@ -20,6 +20,7 @@ class QmlSecurityContractTests(unittest.TestCase):
         cls.picker_helper = (ROOT / "cliamp_file_picker.py").read_text(encoding="utf-8")
         cls.ipc_helper = (ROOT / "cliamp_ipc.py").read_text(encoding="utf-8")
         cls.favorites_helper = (ROOT / "cliamped_search_favorites.py").read_text(encoding="utf-8")
+        cls.library_helper = (ROOT / "cliamped_library.py").read_text(encoding="utf-8")
 
     def test_all_text_primitives_are_plain_text(self):
         self.assertIn("textFormat: Text.PlainText", self.safe_text)
@@ -85,7 +86,7 @@ class QmlSecurityContractTests(unittest.TestCase):
 
     def test_every_helper_is_bound_to_its_qml_parent_lifetime(self):
         self.assertIn("_arm_supervisor_parent_death()", self.process_helper)
-        for source in (self.picker_helper, self.ipc_helper, self.favorites_helper):
+        for source in (self.picker_helper, self.ipc_helper, self.favorites_helper, self.library_helper):
             self.assertIn("_arm_helper_parent_death()", source)
 
     def test_qml_preserves_opaque_protocol_values(self):
@@ -130,18 +131,23 @@ class QmlSecurityContractTests(unittest.TestCase):
         self.assertIn("ADD FOLDER", self.panel)
         self.assertIn('requested === "files" ? "queue"', self.bar)
 
-    def test_library_requests_use_bounded_provider_kinds(self):
-        for kind in ("libArtists", "libAlbums", "libTracks", "libSearch", "libLoad"):
+    def test_library_requests_are_served_by_two_bounded_queues(self):
+        # Requests to CLIAMP keep their kinds; the helper's requests have their own queue.
+        for kind in ("libTracks", "libLoad", "libFavorite", "libFavorites", "libPlaylists", "libPlaylistWrite"):
             with self.subTest(kind=kind):
+                self.assertIn(f'kind === "{kind}"', self.bar)
+        for kind in ("libArtists", "libAlbums", "libTracks", "libSearch", "libRoots", "libQueueFile"):
+            with self.subTest(helper_kind=kind):
                 self.assertIn(f'kind === "{kind}"', self.bar)
         self.assertIn("|| isLibraryKind(kind)", self.bar)
         self.assertIn("root.libraryError = message", self.bar)
         self.assertIn("function libraryRequestIsCurrent(item)", self.bar)
+        self.assertIn("if (pending.length >= 12)", self.bar)
         # Every resident Library list is capped.
-        self.assertIn("slice(0, root.maxLibraryItems)", self.bar)
+        self.assertIn("slice(0, maxLibraryItems)", self.bar)
         # A page is appended only when it follows the list on screen.
-        self.assertIn("current.request.offset === root.libraryArtists.length", self.bar)
-        self.assertIn("current.request.offset === root.libraryAlbums.length", self.bar)
+        self.assertIn("request.offset === libraryArtists.length", self.bar)
+        self.assertIn("request.offset === libraryAlbums.length", self.bar)
         # The start index of an album comes from CLIAMP's queue, which is not
         # trimmed to the resident 128 tracks.
         self.assertIn("if (startAt > 0)", self.bar)
@@ -191,24 +197,45 @@ class QmlSecurityContractTests(unittest.TestCase):
         self.assertIn("enabled: libraryRowLinks.artistLinked", self.panel)
         self.assertIn("enabled: libraryRowLinks.albumLinked", self.panel)
 
-    def test_library_polling_is_bounded_and_stopped_on_teardown(self):
-        self.assertIn("libraryPollsLeft = 200", self.bar)
-        self.assertIn("libraryPollTimer.stop()", self.bar)
-        self.assertEqual(self.bar.count("libraryPollTimer.restart()"), 1)
-        # It follows CLIAMP's own word that the scan ended, sends nothing while
-        # the panel is closed, and never starts for a refused folder.
-        self.assertIn("response.scanning === true", self.bar)
-        self.assertIn("panelLoader.item.opened === true", self.bar)
-        self.assertNotIn('"library.add_root", path: safePath })) startLibraryPolling()', self.bar)
+    def test_library_scan_runs_in_short_bounded_steps(self):
+        # Each step is one helper process with a deadline; the steps are counted.
+        self.assertIn("libraryScanStepsLeft = 4000", self.bar)
+        self.assertIn('{ op: "scan", budget: 8 }', self.bar)
+        for timer in ("libraryScanWatchdog", "libraryScanKill", "libraryWatchdog", "libraryKill"):
+            self.assertIn(f"id: {timer}", self.bar)
+        self.assertIn("libraryScanTimer.stop()", self.bar)
+        self.assertIn("libraryScanProcess.signal(9)", self.bar)
+        self.assertIn("libraryProcess.signal(9)", self.bar)
+        # The next step is asked for only while the helper says that the scan goes on.
+        self.assertIn("var scanning = response.scanning === true", self.bar)
+        # A refused folder starts no scan: the scan starts from the helper's reply.
+        add = self.bar[self.bar.index("function addLibraryRoot(path)"):]
+        add = add[: add.index("function removeLibraryRoot(path)")]
+        self.assertNotIn("startLibraryScan", add)
         # Background refreshes must not wipe an action's error message.
         refresh = self.bar[self.bar.index("function refreshLibraryRoots()"):]
-        refresh = refresh[: refresh.index("function startLibraryPolling()")]
-        self.assertNotIn("runLibraryRequest", refresh)
+        refresh = refresh[: refresh.index("function addLibraryRoot(path)")]
+        self.assertNotIn("runLibraryHelper", refresh)
+
+    def test_every_op_sent_to_the_library_helper_is_in_its_allowlist(self):
+        from cliamped_library import normalize_library_request
+
+        sent = set(re.findall(r'\{\s*op:\s*"([a-z_]+)"', self.bar + self.panel))
+        self.assertTrue({"roots", "add_root", "remove_root", "scan", "artists", "albums",
+                         "artist_albums", "album_tracks", "search", "queue_file"} <= sent)
+        for operation in sorted(sent):
+            with self.subTest(op=operation):
+                try:
+                    normalize_library_request({"op": operation})
+                except ValidationError as error:
+                    # Missing fields are fine here; an unknown operation is not.
+                    self.assertNotIn("unsupported library operation", str(error))
 
     def test_every_command_sent_by_qml_is_in_the_helper_allowlist(self):
         sent = set(re.findall(r'cmd:\s*"([A-Za-z_.]+)"', self.bar + self.panel))
-        self.assertIn("provider.artists", sent)
-        self.assertIn("provider.load_album", sent)
+        # What the Library asks of stock CLIAMP: playing, playlists and favorites.
+        self.assertTrue({"url.load", "queue.clear", "queue.play", "provider.tracks", "provider.load",
+                         "playlist.create", "playlist.add", "playlist.add_many", "playlist.bookmark"} <= sent)
         for command in sorted(sent):
             with self.subTest(command=command):
                 try:

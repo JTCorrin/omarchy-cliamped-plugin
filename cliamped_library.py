@@ -802,10 +802,15 @@ def _queue_directory() -> str:
 
 
 def write_queue_file(db: sqlite3.Connection, album_id: str) -> dict[str, Any]:
-    """Write an M3U8 of an album for CLIAMP's ``url.load``, which loads it in one call."""
+    """Write an M3U8 of an album for CLIAMP's ``url.load``, which loads it in one call.
+
+    The file holds bare paths. CLIAMP reads the tags of a file itself when its
+    playlist line has no #EXTINF description, so it shows the artist and the
+    album; a description would be taken whole as the title.
+    """
 
     rows = db.execute(
-        "SELECT path, artist, title FROM tracks WHERE album_id = ? ORDER BY disc, track, path LIMIT ?",
+        "SELECT path FROM tracks WHERE album_id = ? ORDER BY disc, track, path LIMIT ?",
         (album_id, M3U_MAX_TRACKS),
     ).fetchall()
     if not rows:
@@ -819,11 +824,7 @@ def write_queue_file(db: sqlite3.Connection, album_id: str) -> dict[str, Any]:
                     os.unlink(os.path.join(directory, name))
             except OSError:
                 pass
-    lines = ["#EXTM3U"]
-    for path, artist, title in rows:
-        label = f"{artist} - {title}" if artist else title
-        lines.append(f"#EXTINF:-1,{label}")
-        lines.append(path)
+    lines = ["#EXTM3U"] + [path for (path,) in rows]
     target = os.path.join(directory, f"queue-{secrets.token_hex(8)}.m3u8")
     descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
