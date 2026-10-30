@@ -164,7 +164,8 @@ BarWidget {
   readonly property bool libraryHasMore: libraryView === "artists" ? libraryArtistsMore
     : (libraryView === "albums" || libraryView === "artistAlbums") ? libraryAlbumsMore : false
   readonly property string librarySortLabel: {
-    // An empty sort is CLIAMP's default, which the provider lists first.
+    // An empty sort is CLIAMP's default. The Library provider lists its
+    // default, by name, first; this tab only talks to that provider.
     for (var i = 0; i < librarySorts.length; ++i)
       if (librarySorts[i].id === librarySort) return librarySorts[i].label
     return librarySorts.length ? librarySorts[0].label : ""
@@ -874,6 +875,7 @@ BarWidget {
     librarySearchQuery = value
     libraryView = "search"
     libraryTracks = []
+    libraryLoaded = false
     librarySearchAttempted = true
     runLibraryRequest("libSearch", {
       cmd: "provider.search", provider: libraryProviderKey, query: value, limit: 50
@@ -1421,7 +1423,9 @@ BarWidget {
         root.currentIndex = root.queueTracks.length ? 0 : -1
         actionRefresh.restart()
       } else if (kind === "libArtists") {
-        if (root.libraryRequestIsCurrent(current)) {
+        // A later page is dropped when the list was reset while it waited.
+        if (root.libraryRequestIsCurrent(current)
+            && (current.request.offset === 0 || current.request.offset === root.libraryArtists.length)) {
           var artistPage = root.normalizeLibraryArtists(response.artists)
           var artistOffset = current.request.offset
           root.libraryArtists = (artistOffset > 0 ? root.libraryArtists : [])
@@ -1432,7 +1436,8 @@ BarWidget {
           root.libraryLoaded = true
         }
       } else if (kind === "libAlbums") {
-        if (root.libraryRequestIsCurrent(current)) {
+        if (root.libraryRequestIsCurrent(current)
+            && (current.request.offset === 0 || current.request.offset === root.libraryAlbums.length)) {
           var albumPage = root.normalizeLibraryAlbums(response.albums)
           var albumOffset = current.request.offset
           root.libraryAlbums = (albumOffset > 0 ? root.libraryAlbums : [])
@@ -1462,7 +1467,9 @@ BarWidget {
         root.currentIndex = root.queueTracks.length ? 0 : -1
         var startAt = root.libraryPendingIndex
         root.libraryPendingIndex = 0
-        if (startAt > 0 && startAt < root.queueTracks.length)
+        // The resident queue keeps at most maxTrackItems, but CLIAMP holds the
+        // whole album, and the tracks view lists up to 200 of it.
+        if (startAt > 0)
           root.enqueueIpc("play", { cmd: "queue.play", index: startAt }, [])
         else if (root.queueTracks.length)
           root.enqueueIpc("action", { cmd: "play" }, ["play"])

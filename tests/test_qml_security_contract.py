@@ -138,6 +138,13 @@ class QmlSecurityContractTests(unittest.TestCase):
         self.assertIn("function libraryRequestIsCurrent(item)", self.bar)
         # Every resident Library list is capped.
         self.assertIn("slice(0, root.maxLibraryItems)", self.bar)
+        # A page is appended only when it follows the list on screen.
+        self.assertIn("current.request.offset === root.libraryArtists.length", self.bar)
+        self.assertIn("current.request.offset === root.libraryAlbums.length", self.bar)
+        # The start index of an album comes from CLIAMP's queue, which is not
+        # trimmed to the resident 128 tracks.
+        self.assertIn("if (startAt > 0)", self.bar)
+        self.assertNotIn("startAt < root.queueTracks.length", self.bar)
 
     def test_every_command_sent_by_qml_is_in_the_helper_allowlist(self):
         sent = set(re.findall(r'cmd:\s*"([A-Za-z_.]+)"', self.bar + self.panel))
