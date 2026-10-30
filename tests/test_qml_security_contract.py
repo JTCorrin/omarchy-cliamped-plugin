@@ -108,13 +108,14 @@ class QmlSecurityContractTests(unittest.TestCase):
         self.assertIn("failureCount >= 6", self.bands)
 
     def test_text_inputs_have_explicit_limits(self):
-        # Provider search, Library search and the queue input.
-        self.assertEqual(self.panel.count("TextInput {"), 3)
+        # Provider search, Library search, playlist name and the queue input.
+        self.assertEqual(self.panel.count("TextInput {"), 4)
         self.assertEqual(self.panel.count("maximumLength: 256"), 2)
+        self.assertEqual(self.panel.count("maximumLength: 128"), 1)
         self.assertEqual(self.panel.count("maximumLength: 4096"), 1)
         # Every input must stop the panel shortcuts from taking its keys.
         blocked = re.search(r"blocked:\s*([^\n]+)", self.panel).group(1)
-        for field in ("queueInput", "providerSearch", "librarySearch"):
+        for field in ("queueInput", "providerSearch", "librarySearch", "playlistNameInput"):
             self.assertIn(f"{field}.activeFocus", blocked)
 
     def test_library_tab_replaces_files_and_the_pickers_moved_to_queue(self):
@@ -145,6 +146,33 @@ class QmlSecurityContractTests(unittest.TestCase):
         # trimmed to the resident 128 tracks.
         self.assertIn("if (startAt > 0)", self.bar)
         self.assertNotIn("startAt < root.queueTracks.length", self.bar)
+
+    def test_library_folder_picker_returns_to_the_library_not_the_queue(self):
+        # The folder-only picker mode, its argument, and where its result goes.
+        self.assertIn('"--music-folder"', self.panel)
+        self.assertIn('root.pickerMode === "music"', self.panel)
+        self.assertIn("addLibraryRoot(response.path)", self.panel)
+        exit_handler = self.panel[self.panel.index("onExited: function(exitCode)"):]
+        music_branch = exit_handler[exit_handler.index('if (root.pickerMode === "music") {'):]
+        music_branch = music_branch[: music_branch.index("if (root.audioPickerTimedOut)")]
+        self.assertIn('root.libraryTab = "library"', music_branch)
+        self.assertNotIn('"queue"', music_branch)
+        # The picker is the only way to name a folder: QML never takes a typed path.
+        self.assertNotIn("addLibraryRoot(librarySearch", self.panel)
+        self.assertNotIn("addLibraryRoot(playlistNameInput", self.panel)
+
+    def test_playlist_writes_are_chunked_and_never_exceed_the_helper_limit(self):
+        self.assertIn("i += 24", self.bar)
+        self.assertIn("tracks.slice(i, i + 24)", self.bar)
+        # A failed write must not leave the pending counter stuck.
+        self.assertIn('kind === "libPlaylistWrite") root.libraryWritesPending = Math.max(0,', self.bar)
+        # Favorites and Recently Played are CLIAMP's own lists, not add targets.
+        self.assertIn('"Favorites" && id !== "Recently Played"', self.bar)
+
+    def test_library_polling_is_bounded_and_stopped_on_teardown(self):
+        self.assertIn("libraryPollsLeft = 15", self.bar)
+        self.assertIn("libraryPollTimer.stop()", self.bar)
+        self.assertEqual(self.bar.count("libraryPollTimer.restart()"), 1)
 
     def test_every_command_sent_by_qml_is_in_the_helper_allowlist(self):
         sent = set(re.findall(r'cmd:\s*"([A-Za-z_.]+)"', self.bar + self.panel))

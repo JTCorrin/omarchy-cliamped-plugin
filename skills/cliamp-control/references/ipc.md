@@ -25,6 +25,8 @@ Useful read operations:
 {"cmd":"provider.artist_albums","provider":"library","artist":"<artist id>","offset":0,"limit":60}
 {"cmd":"provider.albums","provider":"library","sort":"newest","offset":0,"limit":60}
 {"cmd":"provider.album_tracks","provider":"library","album":"<album id>","offset":0,"limit":200}
+{"cmd":"provider.tracks","provider":"library","playlist":"<playlist id>","offset":0,"limit":200}
+{"cmd":"library.roots"}
 {"cmd":"history","limit":24}
 {"cmd":"lyrics"}
 {"cmd":"device","name":"list"}
@@ -44,6 +46,12 @@ Mutating operations used by CLIAMPed:
 {"cmd":"provider.favorite","provider":"radio","playlist":"<id>"}
 {"cmd":"provider.load_album","provider":"library","album":"<album id>"}
 {"cmd":"playlist.bookmark","provider":"library","track":{"path":"/absolute/path/to/audio.flac"}}
+{"cmd":"library.add_root","path":"/absolute/path/to/music"}
+{"cmd":"library.remove_root","path":"/absolute/path/to/music"}
+{"cmd":"library.scan"}
+{"cmd":"playlist.create","provider":"library","playlist":"Road trip"}
+{"cmd":"playlist.add","provider":"library","playlist":"Road trip","track":{"path":"/absolute/path/to/audio.flac"}}
+{"cmd":"playlist.add_many","provider":"library","playlist":"Road trip","tracks":[{"path":"/absolute/path/to/a.flac"}]}
 ```
 
 The IPC `volume` value is an absolute dB target, unlike the relative delta accepted by `cliamp volume`. Keep absolute targets within `-30` to `+6` dB.

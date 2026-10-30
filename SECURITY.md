@@ -32,7 +32,12 @@ page, 64 history/device items, and 512 lyric lines. The Library browse commands
 IDs are opaque strings of at most 512 bytes, `sort` is at most 64 bytes, and
 `offset` and `limit` are bounded per page. Responses are checked against the
 modeled artist, album, sort and track fields: an item with any other field is
-rejected, not trimmed. QML applies a second, smaller retention boundary of
+rejected, not trimmed. The folder commands (`library.add_root`,
+`library.remove_root`) take one path of at most 4 KiB and nothing else, and
+the QML only sends a path that the sandboxed `--music-folder` chooser returned.
+The chooser asks Zenity for exactly one folder, validates it as an absolute
+path, and never walks it. `playlist.add_many` takes at most 64 tracks, and the
+panel sends 24 at a time. QML applies a second, smaller retention boundary of
 128 playlists/tracks/favorites, 600 Library artists or albums, 24 history items,
 32 devices, and 256 lyric lines, with a 128 Ki-character aggregate budget. The resident IPC work queue is
 limited to 24 entries and coalesces polls, searches, and volume snapshots.

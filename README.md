@@ -50,14 +50,17 @@ The Library tab searches and browses the music that CLIAMP's Library provider ha
 
 - **Artists** lists artists, then their albums, then the tracks of an album.
 - **Albums** lists every album. The sort button cycles the orders that CLIAMP offers, such as Recently Added.
+- **Playlists** lists your saved playlists, including Favorites and Recently Played. Selecting one opens its tracks; **Play All** or a track starts it.
+- **Folders** lists the music folders and how many tracks each holds, with **Add Music Folder…**, **Rescan** and **Remove**. With no folder yet, this is the view that opens.
 - The search box finds tracks by title, artist or album. Words may come in any order and accents do not count. Selecting a result plays it.
+- The **＋** at the end of a track row adds the track to a playlist: name a new one, or pick one of yours. **Save Album** in an album does the same for every track of the album. Playlists are CLIAMP's saved playlists, so they also appear in CLIAMP's own playlist list.
 - The star at the end of a track row toggles CLIAMP's ♥ favorite for that track, in album lists and in search results. Favorites appear under **Browse → Library → Favorites**, and in CLIAMP's own Favorites list. The Favorites tab of CLIAMPed is for Radio Browser stations only.
 - **Browse → Library** also shows your saved collections, and a button that opens the Library tab.
 - **Play Album** loads the open album into the Queue and plays it. Selecting a track in an album loads the album and starts at that track.
 
-Lists load 60 items at a time with **Load More**, and the panel keeps at most 600 items of a list. An album shows at most 200 tracks, and a search shows at most 50 results.
+The chooser returns exactly one folder and never lists or queues its files; CLIAMP checks that the folder exists and is not inside, or above, a folder that is already in the Library. Lists load 60 items at a time with **Load More**, and the panel keeps at most 600 items of a list. An album shows at most 200 tracks, and a search shows at most 50 results.
 
-The tab needs a CLIAMP build that has the Library provider, installed as `/usr/bin/cliamp`, and at least one folder under `[library]`. Without them the tab says that the Library is not available, and the other tabs work as before. New music appears after CLIAMP rescans: it scans at start, and `Ctrl+R` in the provider pane of the CLIAMP TUI scans again.
+The tab needs a CLIAMP build that has the Library provider, installed as `/usr/bin/cliamp`. Without one the tab says that the Library is not available, and the other tabs work as before. Add your first folder in the Folders view: **Add Music Folder…** opens the native chooser, CLIAMP saves the folder in its `config.toml` and scans it in the background, and the counts update while it runs. For a share that is not mounted yet, mount it first. **Rescan** looks for new, changed and removed files; CLIAMP also scans at start.
 
 The Library tab replaces the former Files tab. Its two buttons moved to the Queue tab.
 

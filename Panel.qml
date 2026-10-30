@@ -45,12 +45,19 @@ Panel {
   function tint(colorValue, alpha) {
     return Qt.rgba(colorValue.r, colorValue.g, colorValue.b, alpha)
   }
+  function failLibraryPicker(message) {
+    root.libraryTab = "library"
+    if (root.hostWidget) root.hostWidget.libraryError = message
+    root.open()
+  }
   function launchAudioPicker(mode) {
     if (audioPicker.running || pickerLaunch.running) return
-    root.pickerMode = mode === "folder" ? "folder" : "files"
-    root.filePickerStatus = mode === "folder"
-      ? "Choose a folder; its audio tracks will be queued in filename order…"
-      : "Waiting for your selection…"
+    root.pickerMode = mode === "folder" ? "folder" : mode === "music" ? "music" : "files"
+    // A music folder is added to the Library, so the Queue has no status to show.
+    root.filePickerStatus = mode === "music" ? ""
+      : mode === "folder"
+        ? "Choose a folder; its audio tracks will be queued in filename order…"
+        : "Waiting for your selection…"
     root.filePickerFailed = false
     // A layer-shell panel sits above ordinary application windows. Close it
     // before Zenity opens so the native picker cannot appear behind the panel.
@@ -98,6 +105,10 @@ Panel {
         audioPickerKill.stop()
         root.audioPickerTimedOut = false
         if (root.destroying) return
+        if (root.pickerMode === "music") {
+          root.failLibraryPicker("Could not start the bounded folder picker.")
+          return
+        }
         root.filePickerStatus = "Could not start the bounded file picker."
         root.filePickerFailed = true
         root.libraryTab = "queue"
@@ -111,6 +122,26 @@ Panel {
       if (root.destroying) return
       var response = null
       try { response = JSON.parse(String(audioPickerOut.text || "")) } catch (e) {}
+      if (root.pickerMode === "music") {
+        // A music folder goes to the Library, not the Queue.
+        var timedOut = root.audioPickerTimedOut
+        root.audioPickerTimedOut = false
+        root.libraryTab = "library"
+        if (!timedOut && response && response.cancelled) {
+          root.open()
+          return
+        }
+        if (timedOut || exitCode !== 0 || !response || !response.ok || typeof response.path !== "string") {
+          root.failLibraryPicker(timedOut ? "Folder selection exceeded its deadline."
+            : response && response.error && root.hostWidget
+              ? root.hostWidget.cleanText(response.error, 1024)
+              : "The folder chooser did not return a folder.")
+          return
+        }
+        if (root.hostWidget) root.hostWidget.addLibraryRoot(response.path)
+        root.open()
+        return
+      }
       if (root.audioPickerTimedOut) {
         root.filePickerStatus = "File selection exceeded its deadline."
         root.filePickerFailed = true
@@ -162,7 +193,7 @@ Panel {
         "/usr/bin/python3",
         "-I",
         String(Qt.resolvedUrl("cliamp_file_picker.py")).replace(/^file:\/\//, ""),
-        root.pickerMode === "folder" ? "--folder" : "--files"
+        root.pickerMode === "folder" ? "--folder" : root.pickerMode === "music" ? "--music-folder" : "--files"
       ]
       root.audioPickerTimedOut = false
       audioPicker.launchPending = true
@@ -205,7 +236,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: queueInput.activeFocus || providerSearch.activeFocus || librarySearch.activeFocus
+      blocked: queueInput.activeFocus || providerSearch.activeFocus || librarySearch.activeFocus || playlistNameInput.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onActivateRequested: if (root.hostWidget) root.hostWidget.togglePlayback()
@@ -1559,17 +1590,21 @@ Panel {
             visible: root.libraryTab === "library"
             readonly property var host: root.hostWidget
             readonly property bool available: host && host.libraryAvailable
+            readonly property bool picking: host && host.libraryPickerOpen
+            readonly property bool showing: available && !picking
             readonly property string view: host ? host.libraryView : "artists"
-            readonly property bool browsing: view === "artists" || view === "albums"
-            readonly property bool cardsView: browsing || view === "artistAlbums"
-            readonly property bool tracksView: view === "tracks" || view === "search"
+            readonly property bool topView: view === "artists" || view === "albums"
+              || view === "playlists" || view === "folders"
+            readonly property bool cardsView: view === "artists" || view === "albums"
+              || view === "artistAlbums" || view === "playlists"
+            readonly property bool tracksView: view === "tracks" || view === "search" || view === "playlistTracks"
 
             SafeText {
               visible: !libraryBody.available
               width: parent.width
               text: libraryBody.host && libraryBody.host.providerBusy
                 ? "LOADING SOURCES…"
-                : "The Library is not available. It needs a CLIAMP build with the Library provider, and a [library] section in CLIAMP's config.toml that lists your music folders in paths."
+                : "The Library is not available. It needs a CLIAMP build with the Library provider, installed as /usr/bin/cliamp."
               color: root.sand
               opacity: 0.88
               font.family: root.panelFont
@@ -1580,7 +1615,7 @@ Panel {
             Row {
               width: parent.width
               spacing: Style.space(8)
-              visible: libraryBody.available
+              visible: libraryBody.showing && libraryBody.view !== "folders"
               Rectangle {
                 width: parent.width - librarySearchButton.width - Style.space(8)
                 height: Style.space(36)
@@ -1648,18 +1683,20 @@ Panel {
             Row {
               id: libraryChipRow
               width: parent.width
-              spacing: Style.space(8)
-              visible: libraryBody.available && libraryBody.browsing
+              spacing: Style.space(6)
+              visible: libraryBody.showing && libraryBody.topView
               Repeater {
                 model: [
                   { key: "artists", label: "ARTISTS" },
-                  { key: "albums", label: "ALBUMS" }
+                  { key: "albums", label: "ALBUMS" },
+                  { key: "playlists", label: "PLAYLISTS" },
+                  { key: "folders", label: "FOLDERS" }
                 ]
                 Rectangle {
                   required property var modelData
                   readonly property bool selected: libraryBody.host
                     && libraryBody.host.libraryTop === modelData.key
-                  width: Style.space(110)
+                  width: Style.space(96)
                   height: Style.space(32)
                   radius: Style.cornerRadius
                   color: selected ? root.tint(root.turquoise, 0.16) : "transparent"
@@ -1672,7 +1709,7 @@ Panel {
                     font.family: root.panelFont
                     font.pixelSize: Style.font.caption
                     font.bold: selected
-                    font.letterSpacing: 1.1
+                    font.letterSpacing: 0.8
                   }
                   MouseArea {
                     anchors.fill: parent
@@ -1684,7 +1721,7 @@ Panel {
               Rectangle {
                 visible: libraryBody.view === "albums" && libraryBody.host
                   && libraryBody.host.librarySorts.length > 1
-                width: Style.space(200)
+                width: Style.space(170)
                 height: Style.space(32)
                 radius: Style.cornerRadius
                 color: sortMouse.containsMouse ? root.tint(root.adobe, 0.2) : root.tint(root.adobe, 0.1)
@@ -1715,7 +1752,7 @@ Panel {
               id: libraryTitleRow
               width: parent.width
               spacing: Style.space(8)
-              visible: libraryBody.available && !libraryBody.browsing
+              visible: libraryBody.showing && !libraryBody.topView
               Rectangle {
                 id: libraryBackButton
                 width: Style.space(84)
@@ -1741,13 +1778,16 @@ Panel {
                 }
               }
               SafeText {
-                width: parent.width - libraryBackButton.width - libraryPlayAlbum.width - parent.spacing * 2
+                width: parent.width - libraryBackButton.width - libraryPlayAll.width
+                  - librarySaveAlbum.width - parent.spacing * 3
                 anchors.verticalCenter: parent.verticalCenter
                 text: !libraryBody.host ? "" : libraryBody.view === "artistAlbums"
                   ? libraryBody.host.libraryArtistName.toUpperCase()
                   : libraryBody.view === "tracks"
                     ? libraryBody.host.libraryAlbumName.toUpperCase()
-                    : "RESULTS FOR “" + libraryBody.host.librarySearchQuery.toUpperCase() + "”"
+                    : libraryBody.view === "playlistTracks"
+                      ? libraryBody.host.libraryPlaylistName.toUpperCase()
+                      : "RESULTS FOR “" + libraryBody.host.librarySearchQuery.toUpperCase() + "”"
                 color: root.turquoise
                 font.family: root.panelFont
                 font.pixelSize: Style.font.caption
@@ -1757,29 +1797,60 @@ Panel {
                 maximumLineCount: 1
               }
               Rectangle {
-                id: libraryPlayAlbum
-                visible: libraryBody.view === "tracks"
-                width: visible ? Style.space(120) : 0
+                id: libraryPlayAll
+                visible: libraryBody.view === "tracks" || libraryBody.view === "playlistTracks"
+                width: visible ? Style.space(112) : 0
                 height: Style.space(34)
                 radius: Style.cornerRadius
-                color: playAlbumMouse.containsMouse ? root.tint(root.adobe, 0.28) : root.tint(root.adobe, 0.15)
+                color: playAllMouse.containsMouse ? root.tint(root.adobe, 0.28) : root.tint(root.adobe, 0.15)
                 border.width: 1
                 border.color: root.adobe
                 SafeText {
                   anchors.centerIn: parent
-                  text: "PLAY ALBUM"
+                  text: libraryBody.view === "playlistTracks" ? "PLAY ALL" : "PLAY ALBUM"
                   color: root.sand
                   font.family: root.panelFont
                   font.pixelSize: Style.font.caption
                   font.bold: true
                 }
                 MouseArea {
-                  id: playAlbumMouse
+                  id: playAllMouse
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
                   enabled: libraryBody.host && libraryBody.host.libraryTracks.length > 0
-                  onClicked: if (root.hostWidget) root.hostWidget.playLibraryAlbum(0)
+                  onClicked: {
+                    if (!root.hostWidget) return
+                    if (libraryBody.view === "playlistTracks") root.hostWidget.playLibraryPlaylist(0)
+                    else root.hostWidget.playLibraryAlbum(0)
+                  }
+                }
+              }
+              Rectangle {
+                id: librarySaveAlbum
+                visible: libraryBody.view === "tracks"
+                width: visible ? Style.space(124) : 0
+                height: Style.space(34)
+                radius: Style.cornerRadius
+                color: saveAlbumMouse.containsMouse ? root.tint(root.turquoise, 0.2) : root.tint(root.turquoise, 0.1)
+                border.width: 1
+                border.color: root.turquoise
+                SafeText {
+                  anchors.centerIn: parent
+                  text: "SAVE ALBUM"
+                  color: root.sand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea {
+                  id: saveAlbumMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  enabled: libraryBody.host && libraryBody.host.libraryTracks.length > 0
+                  onClicked: if (root.hostWidget)
+                    root.hostWidget.openLibraryPicker(root.hostWidget.libraryTracks, root.hostWidget.libraryAlbumName)
                 }
               }
             }
@@ -1789,7 +1860,7 @@ Panel {
               width: parent.width
               columns: 2
               spacing: Style.space(7)
-              visible: libraryBody.available && libraryBody.cardsView
+              visible: libraryBody.showing && libraryBody.cardsView
               Repeater {
                 model: libraryBody.host ? libraryBody.host.libraryCards : []
                 Rectangle {
@@ -1835,10 +1906,10 @@ Panel {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
                       if (!root.hostWidget) return
-                      if (libraryCard.modelData.kind === "artist")
-                        root.hostWidget.openLibraryArtist(libraryCard.modelData.id, libraryCard.modelData.title)
-                      else
-                        root.hostWidget.openLibraryAlbum(libraryCard.modelData.id, libraryCard.modelData.title)
+                      var card = libraryCard.modelData
+                      if (card.kind === "artist") root.hostWidget.openLibraryArtist(card.id, card.title)
+                      else if (card.kind === "playlist") root.hostWidget.openLibraryPlaylist(card.id, card.title)
+                      else root.hostWidget.openLibraryAlbum(card.id, card.title)
                     }
                   }
                 }
@@ -1848,7 +1919,7 @@ Panel {
             Column {
               width: parent.width
               spacing: Style.space(5)
-              visible: libraryBody.available && libraryBody.tracksView
+              visible: libraryBody.showing && libraryBody.tracksView
               Repeater {
                 model: libraryBody.host ? libraryBody.host.libraryTracks : []
                 Rectangle {
@@ -1864,12 +1935,14 @@ Panel {
                     ? root.tint(root.turquoise, 0.55) : root.tint(root.sand, 0.18)
                   SafeText {
                     id: libraryRowNumber
-                    width: libraryBody.view === "tracks" ? Style.space(34) : 0
-                    visible: libraryBody.view === "tracks"
+                    width: libraryBody.view === "search" ? 0 : Style.space(34)
+                    visible: libraryBody.view !== "search"
                     anchors.left: parent.left
                     anchors.leftMargin: Style.space(10)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: ("0" + (libraryRow.modelData.track_number || libraryRow.index + 1)).slice(-2)
+                    text: libraryBody.view === "playlistTracks"
+                      ? String(libraryRow.index + 1)
+                      : ("0" + (libraryRow.modelData.track_number || libraryRow.index + 1)).slice(-2)
                     color: root.mutedSand
                     font.family: root.panelFont
                     font.pixelSize: Style.font.caption
@@ -1877,7 +1950,7 @@ Panel {
                   SafeText {
                     anchors.left: libraryRowNumber.right
                     anchors.right: libraryRowDetail.left
-                    anchors.leftMargin: libraryBody.view === "tracks" ? Style.space(4) : Style.space(10)
+                    anchors.leftMargin: libraryBody.view === "search" ? Style.space(10) : Style.space(4)
                     anchors.rightMargin: Style.space(8)
                     anchors.verticalCenter: parent.verticalCenter
                     text: libraryRow.modelData.title || libraryRow.modelData.path
@@ -1900,12 +1973,23 @@ Panel {
                     horizontalAlignment: Text.AlignHCenter
                   }
                   SafeText {
-                    id: libraryRowDetail
-                    width: parent.width * 0.3
+                    id: libraryRowAdd
+                    width: Style.space(34)
                     anchors.right: libraryRowStar.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "＋"
+                    color: root.turquoise
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.body
+                    horizontalAlignment: Text.AlignHCenter
+                  }
+                  SafeText {
+                    id: libraryRowDetail
+                    width: parent.width * 0.26
+                    anchors.right: libraryRowAdd.left
                     anchors.rightMargin: Style.space(6)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: libraryBody.view === "search"
+                    text: libraryBody.view === "search" || libraryBody.view === "playlistTracks"
                       ? [libraryRow.modelData.artist, libraryRow.modelData.album]
                           .filter(function(value) { return !!value }).join("  ·  ")
                       : root.clock(libraryRow.modelData.duration_secs)
@@ -1922,19 +2006,30 @@ Panel {
                     anchors.right: parent.right
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    width: Style.space(42)
+                    width: Style.space(40)
                     cursorShape: Qt.PointingHandCursor
                     onClicked: if (root.hostWidget) root.hostWidget.toggleTrackFavorite(libraryRow.modelData)
                   }
                   MouseArea {
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(40)
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: Style.space(40)
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (root.hostWidget)
+                      root.hostWidget.openLibraryPicker([libraryRow.modelData], libraryRow.modelData.title)
+                  }
+                  MouseArea {
                     id: libraryRowMouse
                     anchors.fill: parent
-                    anchors.rightMargin: Style.space(42)
+                    anchors.rightMargin: Style.space(80)
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
                       if (!root.hostWidget) return
                       if (libraryBody.view === "tracks") root.hostWidget.playLibraryAlbum(libraryRow.index)
+                      else if (libraryBody.view === "playlistTracks") root.hostWidget.playLibraryPlaylist(libraryRow.index)
                       else root.hostWidget.playProviderTrack(libraryRow.modelData)
                     }
                   }
@@ -1943,7 +2038,7 @@ Panel {
             }
 
             Rectangle {
-              visible: libraryBody.available && libraryBody.cardsView && libraryBody.host
+              visible: libraryBody.showing && libraryBody.cardsView && libraryBody.host
                 && libraryBody.host.libraryHasMore
               width: parent.width
               height: Style.space(40)
@@ -1968,9 +2063,327 @@ Panel {
               }
             }
 
+            Column {
+              id: libraryFolders
+              width: parent.width
+              spacing: Style.space(8)
+              visible: libraryBody.showing && libraryBody.view === "folders"
+              SafeText {
+                text: "MUSIC FOLDERS"
+                color: root.adobe
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.2
+              }
+              SafeText {
+                visible: libraryBody.host && libraryBody.host.libraryRootsLoaded
+                  && libraryBody.host.libraryRoots.length === 0
+                width: parent.width
+                text: "No music folder yet. Add the folder where your music lives, such as a mounted NAS share. CLIAMP reads its tags in the background, so a large collection can take several minutes the first time."
+                color: root.sand
+                opacity: 0.92
+                font.family: root.panelFont
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Repeater {
+                model: libraryBody.host ? libraryBody.host.libraryRoots : []
+                Rectangle {
+                  id: folderRow
+                  required property var modelData
+                  width: libraryFolders.width
+                  height: Style.space(48)
+                  radius: Style.cornerRadius
+                  color: root.tint(root.night, 0.46)
+                  border.width: 1
+                  border.color: modelData.available ? root.tint(root.sand, 0.3) : root.adobe
+                  Column {
+                    anchors.left: parent.left
+                    anchors.right: removeFolder.left
+                    anchors.leftMargin: Style.space(12)
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(2)
+                    SafeText {
+                      width: parent.width
+                      text: folderRow.modelData.path
+                      color: root.sand
+                      font.family: root.panelFont
+                      font.pixelSize: Style.font.bodySmall
+                      elide: Text.ElideMiddle
+                      maximumLineCount: 1
+                    }
+                    SafeText {
+                      width: parent.width
+                      text: (folderRow.modelData.tracks === 1 ? "1 TRACK" : folderRow.modelData.tracks + " TRACKS")
+                        + (folderRow.modelData.available ? "" : "  ·  NOT READABLE, SHOWING THE SAVED INDEX")
+                      color: folderRow.modelData.available ? root.mutedSand : root.adobe
+                      font.family: root.panelFont
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                      maximumLineCount: 1
+                    }
+                  }
+                  Rectangle {
+                    id: removeFolder
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(84)
+                    height: Style.space(30)
+                    radius: Style.cornerRadius
+                    color: removeMouse.containsMouse ? root.tint(root.adobe, 0.25) : "transparent"
+                    border.width: 1
+                    border.color: root.adobe
+                    SafeText {
+                      anchors.centerIn: parent
+                      text: "REMOVE"
+                      color: root.sand
+                      font.family: root.panelFont
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+                    MouseArea {
+                      id: removeMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: if (root.hostWidget) root.hostWidget.removeLibraryRoot(folderRow.modelData.path)
+                    }
+                  }
+                }
+              }
+              Row {
+                id: folderActions
+                width: parent.width
+                spacing: Style.space(8)
+                Repeater {
+                  model: [
+                    { action: "add", label: "ADD MUSIC FOLDER…" },
+                    { action: "scan", label: "RESCAN" }
+                  ]
+                  Rectangle {
+                    required property var modelData
+                    readonly property bool available: root.hostWidget && root.hostWidget.sessionReady
+                      && (modelData.action === "add" || root.hostWidget.libraryRoots.length > 0)
+                    width: (folderActions.width - folderActions.spacing) / 2
+                    height: Style.space(44)
+                    radius: Style.cornerRadius
+                    color: folderActionMouse.containsMouse
+                      ? root.tint(root.adobe, 0.22) : root.tint(root.adobe, 0.12)
+                    border.width: 1
+                    border.color: root.tint(root.adobe, available ? 1 : 0.3)
+                    SafeText {
+                      anchors.centerIn: parent
+                      text: modelData.label
+                      color: available ? root.sand : root.mutedSand
+                      opacity: available ? 1 : 0.5
+                      font.family: root.panelFont
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+                    MouseArea {
+                      id: folderActionMouse
+                      anchors.fill: parent
+                      enabled: parent.available
+                      hoverEnabled: true
+                      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                      onClicked: {
+                        if (!root.hostWidget) return
+                        if (modelData.action === "add") root.launchAudioPicker("music")
+                        else root.hostWidget.rescanLibrary()
+                      }
+                    }
+                  }
+                }
+              }
+              SafeText {
+                visible: libraryBody.host && libraryBody.host.libraryPollsLeft > 0
+                width: parent.width
+                text: "SCANNING… THE COUNTS ABOVE UPDATE AS CLIAMP READS THE FILES."
+                color: root.turquoise
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              SafeText {
+                width: parent.width
+                text: "Removing a folder only takes it out of the Library. Your files are not touched."
+                color: root.mutedSand
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            Column {
+              id: libraryPicker
+              width: parent.width
+              spacing: Style.space(8)
+              visible: libraryBody.available && libraryBody.picking
+              SafeText {
+                width: parent.width
+                text: libraryBody.host
+                  ? "ADD " + (libraryBody.host.libraryPickerTracks.length === 1
+                      ? "“" + libraryBody.host.libraryPickerLabel.toUpperCase() + "”"
+                      : libraryBody.host.libraryPickerTracks.length + " TRACKS")
+                    + " TO A PLAYLIST"
+                  : ""
+                color: root.turquoise
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.1
+                elide: Text.ElideRight
+                maximumLineCount: 1
+              }
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                Rectangle {
+                  width: parent.width - createPlaylistButton.width - Style.space(8)
+                  height: Style.space(36)
+                  radius: Style.cornerRadius
+                  color: root.tint(root.night, 0.5)
+                  border.width: 1
+                  border.color: playlistNameInput.activeFocus ? root.turquoise : root.tint(root.sand, 0.34)
+                  TextInput {
+                    id: playlistNameInput
+                    maximumLength: 128
+                    anchors.fill: parent
+                    anchors.leftMargin: Style.space(10)
+                    anchors.rightMargin: Style.space(10)
+                    verticalAlignment: TextInput.AlignVCenter
+                    color: root.sand
+                    selectionColor: root.adobe
+                    selectedTextColor: root.sand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.bodySmall
+                    clip: true
+                    SafeText {
+                      anchors.verticalCenter: parent.verticalCenter
+                      visible: playlistNameInput.text === "" && !playlistNameInput.activeFocus
+                      text: "NAME A NEW PLAYLIST…"
+                      color: root.sand
+                      opacity: 0.82
+                      font: playlistNameInput.font
+                    }
+                    Keys.onReturnPressed: {
+                      if (root.hostWidget) root.hostWidget.createLibraryPlaylist(text)
+                      text = ""
+                      root.returnToPanelKeys()
+                    }
+                    Keys.onUpPressed: if (root.hostWidget) root.hostWidget.adjustVolume(2)
+                    Keys.onDownPressed: if (root.hostWidget) root.hostWidget.adjustVolume(-2)
+                    Keys.onEscapePressed: root.returnToPanelKeys()
+                  }
+                }
+                Rectangle {
+                  id: createPlaylistButton
+                  width: Style.space(96)
+                  height: Style.space(36)
+                  radius: Style.cornerRadius
+                  color: createMouse.containsMouse ? root.tint(root.adobe, 0.28) : root.tint(root.adobe, 0.15)
+                  border.width: 1
+                  border.color: root.adobe
+                  SafeText {
+                    anchors.centerIn: parent
+                    text: "CREATE"
+                    color: root.sand
+                    font.family: root.panelFont
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+                  MouseArea {
+                    id: createMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      if (root.hostWidget) root.hostWidget.createLibraryPlaylist(playlistNameInput.text)
+                      playlistNameInput.text = ""
+                      root.returnToPanelKeys()
+                    }
+                  }
+                }
+              }
+              SafeText {
+                visible: libraryBody.host && libraryBody.host.libraryTargetPlaylists.length > 0
+                text: "OR PICK ONE OF YOUR PLAYLISTS"
+                color: root.mutedSand
+                font.family: root.panelFont
+                font.pixelSize: Style.font.caption
+                font.letterSpacing: 1
+              }
+              Grid {
+                id: pickerGrid
+                width: parent.width
+                columns: 2
+                spacing: Style.space(7)
+                Repeater {
+                  model: libraryBody.host ? libraryBody.host.libraryTargetPlaylists : []
+                  Rectangle {
+                    id: pickerCard
+                    required property var modelData
+                    width: (pickerGrid.width - pickerGrid.spacing) / 2
+                    height: Style.space(44)
+                    radius: Style.cornerRadius
+                    color: pickerMouse2.containsMouse ? root.tint(root.adobe, 0.18) : root.tint(root.night, 0.46)
+                    border.width: 1
+                    border.color: pickerMouse2.containsMouse ? root.adobe : root.tint(root.sand, 0.3)
+                    SafeText {
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.leftMargin: Style.space(12)
+                      anchors.rightMargin: Style.space(12)
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: pickerCard.modelData.name.toUpperCase()
+                      color: root.sand
+                      font.family: root.panelFont
+                      font.pixelSize: Style.font.bodySmall
+                      elide: Text.ElideRight
+                      maximumLineCount: 1
+                    }
+                    MouseArea {
+                      id: pickerMouse2
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: if (root.hostWidget)
+                        root.hostWidget.addToLibraryPlaylist(pickerCard.modelData.id, pickerCard.modelData.name)
+                    }
+                  }
+                }
+              }
+              Rectangle {
+                width: Style.space(110)
+                height: Style.space(34)
+                radius: Style.cornerRadius
+                color: cancelMouse.containsMouse ? root.tint(root.turquoise, 0.18) : "transparent"
+                border.width: 1
+                border.color: root.turquoise
+                SafeText {
+                  anchors.centerIn: parent
+                  text: "CANCEL"
+                  color: root.sand
+                  font.family: root.panelFont
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea {
+                  id: cancelMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: if (root.hostWidget) root.hostWidget.closeLibraryPicker()
+                }
+              }
+            }
+
             SafeText {
-              visible: libraryBody.available && libraryBody.host && libraryBody.host.providerBusy
-                && !libraryBody.host.libraryLoaded
+              visible: libraryBody.showing && libraryBody.host && libraryBody.host.providerBusy
+                && !libraryBody.host.libraryLoaded && libraryBody.view !== "folders"
               text: "LOADING…"
               color: root.sand
               opacity: 0.88
@@ -1979,16 +2392,29 @@ Panel {
             }
 
             SafeText {
-              visible: libraryBody.available && libraryBody.host && libraryBody.host.libraryLoaded
+              visible: libraryBody.showing && libraryBody.host && libraryBody.host.libraryLoaded
                 && !libraryBody.host.providerBusy
                 && ((libraryBody.cardsView && libraryBody.host.libraryCards.length === 0)
                   || (libraryBody.tracksView && libraryBody.host.libraryTracks.length === 0))
               width: parent.width
               text: libraryBody.view === "search" ? "No matching tracks."
                 : libraryBody.view === "tracks" ? "This album has no tracks."
-                : "Nothing is indexed yet. The first scan of a large share can take several minutes; press the LIBRARY tab again to check."
+                : libraryBody.view === "playlistTracks" ? "This playlist is empty."
+                : libraryBody.view === "playlists"
+                  ? "No playlists yet. Use ＋ on a track, or Save Album, to make one."
+                  : "Nothing is indexed yet. The first scan of a large share can take several minutes; open the Folders view to watch it."
               color: root.sand
               opacity: 0.88
+              font.family: root.panelFont
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            SafeText {
+              visible: libraryBody.host && libraryBody.host.libraryNotice !== ""
+              width: parent.width
+              text: libraryBody.host ? libraryBody.host.libraryNotice : ""
+              color: root.turquoise
               font.family: root.panelFont
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
